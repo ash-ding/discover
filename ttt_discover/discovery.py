@@ -24,8 +24,8 @@ class DiscoverConfig:
     save_every: int = 2
 
     # Training hyperparameters
-    group_size: int = 8
-    groups_per_batch: int = 64
+    group_size: int = 64
+    groups_per_batch: int = 8
     learning_rate: float = 4e-5
     num_epochs: int = 50
     temperature: float = 1.0
