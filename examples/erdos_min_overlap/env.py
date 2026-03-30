@@ -199,7 +199,7 @@ def discover_erdos_min_overlap():
         env_type=ErdosMinOverlapEnv,
         problem_type="",
         num_cpus_per_task=1,
-        eval_timeout=530,
+        eval_timeout=1100,
         experiment_name=f"test-erdos-min-overlap-run",
         wandb_project="erdos-min-overlap",
     )
