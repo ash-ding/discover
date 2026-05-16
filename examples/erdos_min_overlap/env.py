@@ -68,10 +68,7 @@ class ErdosMinOverlapRewardEvaluator(SandboxRewardEvaluator):
 
     def preprocess_generation(self, generation, state) -> str:
         import inspect
-        if self.verifier_src is None:
-            return generation
-
-        verifier_src = inspect.getsource(self.verifier_src)
+        verifier_src = inspect.getsource(verify_c5_solution)
         numpy_import = "import numpy as np"
         
         base = numpy_import + "\n\n" + verifier_src + "\n\n"
