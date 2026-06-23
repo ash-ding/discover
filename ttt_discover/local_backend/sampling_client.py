@@ -188,8 +188,11 @@ class LocalSamplingClient:
         if len(token_ids) < 2:
             return [0.0] * len(token_ids)
 
+        tokenizer = self._get_tokenizer()
+        prompt_text = tokenizer.decode(token_ids, skip_special_tokens=False)
+
         payload: dict[str, Any] = {
-            "prompt": token_ids,
+            "prompt": prompt_text,
             "max_tokens": 1,
             "echo": True,
             "logprobs": 1,
