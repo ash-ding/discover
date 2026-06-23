@@ -280,9 +280,85 @@ CUDA_VISIBLE_DEVICES=0,1 WANDB_MODE=offline PYTORCH_CUDA_ALLOC_CONF=expandable_s
     python -m examples.circle_packing.env --local 32        # 32 circles
 ```
 
+### vLLM V1 引擎与 KL Penalty 优化
+
+**问题**: KL penalty 计算使用 `echo=True` 获取完整序列的 per-token logprobs，在长序列（32K tokens）下 vLLM V0 会 OOM。
+
+**根本原因**: 
+- vLLM V0 的 `echo=True` 需要一次性分配完整的 logits tensor (`seq_len × vocab_size × 2 bytes`)
+- 32768 tokens × 152064 vocab × 2 bytes ≈ 9.3 GiB per request
+- 512 个并发请求会耗尽 GPU 显存
+
+**解决方案**: 升级到 vLLM V1 + 优化内存配置
+
+vLLM V1 的 **chunked prefill** 功能将长序列分块处理，避免一次性分配巨大的 logits tensor。
+
+**最终配置**:
+```bash
+# vLLM V1 启动参数（TP=2 双卡推理）
+CUDA_VISIBLE_DEVICES=0,1,2 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
+    python -m vllm.entrypoints.openai.api_server \
+    --model /workspace/home/asherding/models/Qwen3-8B \
+    --port 8000 \
+    --tensor-parallel-size 2 \
+    --max-model-len 32768 \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --gpu-memory-utilization 0.70 \
+    --max-num-seqs 4 \
+    --disable-custom-all-reduce
+```
+
+**关键参数**:
+- `gpu_memory_utilization=0.70` — KV cache 占 ~56 GiB，留 ~24 GiB 给 logits 计算
+- `max_num_seqs=4` — 限制同时处理 4 个序列（4 × 4.64 GiB ≈ 18.6 GiB < 24 GiB）
+- `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` — 启用 `/v1/load_lora_adapter` 热加载端点
+
+**LoRA 热加载修复**:
+
+vLLM V1 的 `max_loras=1` 限制要求先 unload 旧 adapter 再 load 新的：
+
+```python
+# sampling_client.py update_lora() 中的顺序
+# 1. Unload old adapter
+await session.post(f"{base_url}/v1/unload_lora_adapter", json={"lora_name": old_name})
+# 2. Load new adapter
+await session.post(f"{base_url}/v1/load_lora_adapter", json={"lora_name": new_name, "lora_path": path})
+```
+
+**训练序列长度**:
+
+启用 gradient checkpointing 后，32768 token 训练序列峰值显存 ~53 GiB（H100 80GB 安全）：
+
+```python
+# training_client.py
+max_train_seq_len = 32768  # 之前是 8192
+```
+
+### Rollout 进度可视化
+
+添加 tqdm 进度条显示 rollout 完成进度：
+
+```python
+# ttt_discover/rl/train.py
+from tqdm.asyncio import tqdm
+
+trajectory_groups_P = await tqdm.gather(
+    *[...],
+    desc=f"Rollouts [batch {i_batch}]",
+    total=len(env_group_builders_P),
+)
+```
+
+输出示例:
+```
+Rollouts [batch 0]: 100%|██████████| 8/8 [37:29<00:00, 281.18s/it]
+```
+
 ### 备注
 - eval_timeout=530s
 - local_backend 直接复用
+- 论文配置: group_size=64, groups_per_batch=8, num_epochs=50, phase1_max_tokens=26000, kl_penalty_coef=0.1
 
 ---
 
