@@ -1,4 +1,5 @@
 import logging
+import os
 
 from ttt_discover.local_backend.sampling_client import LocalSamplingClient
 from ttt_discover.local_backend.training_client import LocalTrainingClient
@@ -7,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class LocalServiceClient:
-    """Drop-in replacement for tinker.ServiceClient for local RL training."""
+    """Orchestrates HTTP sampling client + local PEFT training client."""
 
     def __init__(
         self,
@@ -19,44 +20,48 @@ class LocalServiceClient:
         experiment_name: str = "default",
     ):
         self.model_name_or_path = model_name_or_path
-        self.inference_gpu_id = inference_gpu_id
         self.training_gpu_id = training_gpu_id
-        self.inference_tp_size = inference_tp_size
-        self.max_model_len = max_model_len
         self.experiment_name = experiment_name
+        self.vllm_base_url = os.environ.get(
+            "VLLM_BASE_URL", "http://localhost:8000"
+        )
+        self._tokenizer = None
         self._inference_client = None
 
     def _get_inference_client(self) -> LocalSamplingClient:
         if self._inference_client is None:
+            if self._tokenizer is None:
+                from transformers import AutoTokenizer
+
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_name_or_path,
+                    use_fast=True,
+                    trust_remote_code=True,
+                )
             self._inference_client = LocalSamplingClient(
-                model_name_or_path=self.model_name_or_path,
-                gpu_id=self.inference_gpu_id,
-                lora_adapter_path=None,
-                tensor_parallel_size=self.inference_tp_size,
-                max_model_len=self.max_model_len,
+                base_url=self.vllm_base_url,
+                model_name=self.model_name_or_path,
+                tokenizer=self._tokenizer,
             )
         return self._inference_client
-
-    def _attach_shared_client(self, training_client: LocalTrainingClient):
-        training_client.set_shared_sampling_client(self._get_inference_client())
 
     async def create_lora_training_client_async(
         self, model_name: str, rank: int = 32
     ) -> LocalTrainingClient:
-        self._get_inference_client()
         tc = LocalTrainingClient(
             model_name_or_path=self.model_name_or_path,
             lora_rank=rank,
             gpu_id=self.training_gpu_id,
             checkpoint_dir=f"./tinker_log/local_checkpoints/{self.experiment_name}",
         )
-        tc.set_shared_sampling_client(self._inference_client)
+        self._tokenizer = tc.get_tokenizer()
+        inference_client = self._get_inference_client()
+        tc.set_shared_sampling_client(inference_client)
         return tc
 
     async def create_training_client_from_state_async(
         self, state_path: str
     ) -> LocalTrainingClient:
-        self._get_inference_client()
         tc = LocalTrainingClient.from_checkpoint(
             model_name_or_path=self.model_name_or_path,
             checkpoint_path=state_path,
@@ -64,13 +69,14 @@ class LocalServiceClient:
             load_optimizer=False,
             checkpoint_dir=f"./tinker_log/local_checkpoints/{self.experiment_name}",
         )
-        tc.set_shared_sampling_client(self._inference_client)
+        self._tokenizer = tc.get_tokenizer()
+        inference_client = self._get_inference_client()
+        tc.set_shared_sampling_client(inference_client)
         return tc
 
     async def create_training_client_from_state_with_optimizer_async(
         self, state_path: str
     ) -> LocalTrainingClient:
-        self._get_inference_client()
         tc = LocalTrainingClient.from_checkpoint(
             model_name_or_path=self.model_name_or_path,
             checkpoint_path=state_path,
@@ -78,23 +84,26 @@ class LocalServiceClient:
             load_optimizer=True,
             checkpoint_dir=f"./tinker_log/local_checkpoints/{self.experiment_name}",
         )
-        self._attach_shared_client(tc)
+        self._tokenizer = tc.get_tokenizer()
+        inference_client = self._get_inference_client()
+        tc.set_shared_sampling_client(inference_client)
         return tc
 
-    def create_sampling_client(self, base_model: str | None = None) -> "BaseModelSamplingProxy":
-        return BaseModelSamplingProxy(self._get_inference_client())
+    def create_sampling_client(
+        self, base_model: str | None = None
+    ) -> LocalSamplingClient:
+        """Return an HTTP client without LoRA — used for base model logprobs (KL penalty)."""
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
 
-
-class BaseModelSamplingProxy:
-    """Proxy that temporarily disables LoRA for base model logprob computation (KL penalty)."""
-
-    def __init__(self, client: LocalSamplingClient):
-        self._client = client
-
-    async def compute_logprobs_async(self, sequence) -> list[float]:
-        saved = self._client.lora_adapter_path
-        self._client.lora_adapter_path = None
-        try:
-            return await self._client.compute_logprobs_async(sequence)
-        finally:
-            self._client.lora_adapter_path = saved
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name_or_path,
+                use_fast=True,
+                trust_remote_code=True,
+            )
+        return LocalSamplingClient(
+            base_url=self.vllm_base_url,
+            model_name=self.model_name_or_path,
+            lora_name=None,
+            tokenizer=self._tokenizer,
+        )
