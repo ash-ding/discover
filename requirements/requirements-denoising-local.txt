@@ -1,0 +1,19 @@
+# Denoising task + local RL backend
+-r denoising/requirements-denoising.txt
+
+# Local RL backend dependencies
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+vllm==0.8.5.post1
+peft>=0.19
+accelerate>=1.14
+opentelemetry-sdk>=1.42,<1.43
+opentelemetry-api>=1.42,<1.43
+opentelemetry-semantic-conventions>=0.48b0
+opentelemetry-exporter-otlp-proto-grpc>=1.42,<1.43
+opentelemetry-proto>=1.42,<1.43
+opentelemetry-exporter-prometheus>=0.63b1
+
+# Install manually after pip install:
+# pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6/
+# pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir
