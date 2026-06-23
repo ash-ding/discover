@@ -15,6 +15,7 @@ import math
 import tinker
 import torch
 from tinker.types import LossFnType
+from tqdm.asyncio import tqdm
 from ttt_discover.tinker_utils.misc_utils import get_last_checkpoint, save_checkpoint_async
 from ttt_discover.tinker_utils.completers import TwoPhaseTokenCompleter, Qwen3TwoPhaseTokenCompleter
 from ttt_discover.rl.data_processing import (
@@ -339,6 +340,7 @@ async def do_group_rollout_and_filter_constant_reward(
     step_idx=-1,
     model_name: str = "",
     phase1_max_tokens: int = 27000,
+    context_window: int = 32768,
 ) -> TrajectoryGroup | None:
     from ttt_discover.tinker_utils.misc_utils import get_tokenizer
 
@@ -351,6 +353,7 @@ async def do_group_rollout_and_filter_constant_reward(
             tokenizer=tokenizer,
             phase1_max_tokens=phase1_max_tokens,
             temperature=temperature,
+            context_window=context_window,
         )
     else:
         policy = TwoPhaseTokenCompleter(
@@ -358,6 +361,7 @@ async def do_group_rollout_and_filter_constant_reward(
             tokenizer=tokenizer,
             phase1_max_tokens=phase1_max_tokens,
             temperature=temperature,
+            context_window=context_window,
         )
 
     trajectory_group = await do_group_rollout(env_group_builder, policy, step_idx)
@@ -387,7 +391,7 @@ async def save_checkpoint_and_get_sampling_client(
                 loop_state={"batch": i_batch},
                 kind="both",
             )
-            return training_client.create_sampling_client(path_dict["sampler_path"]), metrics
+            return await training_client.create_sampling_client(path_dict["sampler_path"]), metrics
         else:
             return await training_client.save_weights_and_get_sampling_client_async(), metrics
 
@@ -547,7 +551,7 @@ async def do_sync_training(
         with timed("sampling", metrics):
             # Note: do_remove_constant_reward_groups=False here because we remove
             # constant reward groups after all rollouts are collected (below)
-            trajectory_groups_P = await asyncio.gather(
+            trajectory_groups_P = await tqdm.gather(
                 *[
                     asyncio.create_task(
                         do_group_rollout_and_filter_constant_reward(
@@ -558,11 +562,14 @@ async def do_sync_training(
                             step_idx=i_batch,
                             model_name=cfg.local_model_path or cfg.model_name,
                             phase1_max_tokens=cfg.phase1_max_tokens,
+                            context_window=cfg.max_model_len,
                         ),
                         name=f"sample_task_{i}",
                     )
                     for i, builder in enumerate(env_group_builders_P)
                 ],
+                desc=f"Rollouts [batch {i_batch}]",
+                total=len(env_group_builders_P),
             )
 
         if hasattr(dataset, 'flush'):
