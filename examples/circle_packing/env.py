@@ -157,6 +157,7 @@ def discover_circle_packing(num_circles: str):
 
 
 def discover_circle_packing_local(num_circles: str):
+    # Test with groups_per_batch=3 to verify deadlock fix
     config = DiscoverConfig(
         env_type=CirclePackingEnv,
         problem_type=num_circles,
@@ -168,17 +169,17 @@ def discover_circle_packing_local(num_circles: str):
         training_gpu_id=2,
         inference_tp_size=2,
         max_model_len=32768,
-        group_size=64,
-        groups_per_batch=8,
-        num_epochs=50,
-        phase1_max_tokens=26000,
+        group_size=8,
+        groups_per_batch=3,
+        num_epochs=2,
+        phase1_max_tokens=4000,
         kl_penalty_coef=0.1,
         lora_rank=32,
         learning_rate=4e-5,
         save_every=2,
         num_cpus_per_task=1,
         eval_timeout=530,
-        experiment_name=f"circle-packing-{num_circles}-paper-config",
+        experiment_name=f"circle-packing-{num_circles}-gpb3-test",
         wandb_project="circle-packing",
     )
     discover(config)
