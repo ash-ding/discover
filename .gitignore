@@ -235,3 +235,8 @@ gpu_mode/gpu_scores.tsv
 tinker_log/
 openproblems/
 data/
+
+*.pdf
+
+# AHC test data cache (downloaded via get_cache.sh)
+examples/ahc/lib/cache/
