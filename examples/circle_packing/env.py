@@ -158,7 +158,7 @@ def discover_circle_packing(num_circles: str):
 
 def discover_circle_packing_local(num_circles: str):
     # Paper-matching configuration (Table 9 from TTT-Discover paper)
-    # vLLM V1 chunked prefill handles KL penalty memory automatically
+    # Using TP=4 for inference (GPUs 0-3) + single GPU training (GPU 4)
     config = DiscoverConfig(
         env_type=CirclePackingEnv,
         problem_type=num_circles,
@@ -167,8 +167,8 @@ def discover_circle_packing_local(num_circles: str):
         renderer_name="qwen3",
         use_local_backend=True,
         inference_gpu_id=0,
-        training_gpu_id=2,
-        inference_tp_size=2,
+        training_gpu_id=4,
+        inference_tp_size=4,
         max_model_len=32768,
         group_size=64,
         groups_per_batch=8,
