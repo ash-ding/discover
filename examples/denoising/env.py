@@ -295,5 +295,34 @@ def discover_denoising():
     discover(config)
 
 
+def discover_denoising_local():
+    config = DiscoverConfig(
+        env_type=DenoisingEnv,
+        problem_type="",
+        model_name="Qwen/Qwen3-8B",
+        local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+        renderer_name="qwen3",
+        use_local_backend=True,
+        inference_gpu_id=0,
+        training_gpu_id=1,
+        group_size=2,
+        groups_per_batch=1,
+        num_epochs=1,
+        phase1_max_tokens=4000,
+        kl_penalty_coef=0.0,
+        lora_rank=32,
+        learning_rate=4e-5,
+        num_cpus_per_task=1,
+        eval_timeout=530,
+        experiment_name="denoising-qwen3-8b-local",
+        wandb_project="denoising",
+    )
+    discover(config)
+
+
 if __name__ == "__main__":
-    discover_denoising()
+    import sys
+    if "--local" in sys.argv:
+        discover_denoising_local()
+    else:
+        discover_denoising()

@@ -347,6 +347,36 @@ def discover_ac(problem_type: str):
     discover(config)
 
 
+def discover_ac_local(problem_type: str):
+    config = DiscoverConfig(
+        env_type=AutoCorrInequalityEnv,
+        problem_type=problem_type,
+        model_name="Qwen/Qwen3-8B",
+        local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+        renderer_name="qwen3",
+        use_local_backend=True,
+        inference_gpu_id=0,
+        training_gpu_id=1,
+        group_size=2,
+        groups_per_batch=1,
+        num_epochs=1,
+        phase1_max_tokens=4000,
+        kl_penalty_coef=0.0,
+        lora_rank=32,
+        learning_rate=4e-5,
+        num_cpus_per_task=CPUS_PER_TASK,
+        eval_timeout=1100,
+        experiment_name=f"{problem_type}-qwen3-8b-local",
+        wandb_project=f"ac-inequalities-{problem_type}",
+    )
+    discover(config)
+
+
 if __name__ == "__main__":
-    discover_ac("ac1")
-    # discover_ac("ac2")
+    import sys
+    if "--local" in sys.argv:
+        problem = "ac2" if "--ac2" in sys.argv else "ac1"
+        discover_ac_local(problem)
+    else:
+        discover_ac("ac1")
+        # discover_ac("ac2")

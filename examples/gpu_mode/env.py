@@ -232,6 +232,35 @@ def discover_gpu_mode(problem_type: str):
     discover(config)
 
 
+def discover_gpu_mode_local(problem_type: str):
+    config = DiscoverConfig(
+        env_type=GpuModeEnv,
+        problem_type=problem_type,
+        model_name="Qwen/Qwen3-8B",
+        local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+        renderer_name="qwen3",
+        use_local_backend=True,
+        inference_gpu_id=0,
+        training_gpu_id=1,
+        group_size=2,
+        groups_per_batch=1,
+        num_epochs=1,
+        phase1_max_tokens=4000,
+        kl_penalty_coef=0.0,
+        lora_rank=32,
+        learning_rate=4e-5,
+        eval_timeout=530,
+        experiment_name=f"gpu-mode-{problem_type}-qwen3-8b-local",
+        wandb_project="gpu-mode",
+    )
+    discover(config)
+
+
 if __name__ == "__main__":
-    discover_gpu_mode("trimul")
-    # discover_gpu_mode("mla_decode_nvidia")
+    import sys
+    if "--local" in sys.argv:
+        problem = "mla_decode_nvidia" if "--mla" in sys.argv else "trimul"
+        discover_gpu_mode_local(problem)
+    else:
+        discover_gpu_mode("trimul")
+        # discover_gpu_mode("mla_decode_nvidia")

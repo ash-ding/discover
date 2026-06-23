@@ -156,6 +156,36 @@ def discover_circle_packing(num_circles: str):
     discover(config)
 
 
+def discover_circle_packing_local(num_circles: str):
+    config = DiscoverConfig(
+        env_type=CirclePackingEnv,
+        problem_type=num_circles,
+        model_name="Qwen/Qwen3-8B",
+        local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+        renderer_name="qwen3",
+        use_local_backend=True,
+        inference_gpu_id=0,
+        training_gpu_id=1,
+        group_size=2,
+        groups_per_batch=1,
+        num_epochs=1,
+        phase1_max_tokens=4000,
+        kl_penalty_coef=0.0,
+        lora_rank=32,
+        learning_rate=4e-5,
+        num_cpus_per_task=1,
+        eval_timeout=530,
+        experiment_name=f"circle-packing-{num_circles}-qwen3-8b-local",
+        wandb_project="circle-packing",
+    )
+    discover(config)
+
+
 if __name__ == "__main__":
-    num_circles = "26" # or "32"
-    discover_circle_packing(num_circles)
+    import sys
+    if "--local" in sys.argv:
+        n = sys.argv[sys.argv.index("--local") + 1] if len(sys.argv) > sys.argv.index("--local") + 1 else "26"
+        discover_circle_packing_local(n)
+    else:
+        num_circles = "26" # or "32"
+        discover_circle_packing(num_circles)

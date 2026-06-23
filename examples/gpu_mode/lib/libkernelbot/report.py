@@ -226,12 +226,14 @@ def make_test_log(run: RunResult) -> str:
             test_log.append(f"✅ {spec}")
             msg = run.result.get(f"test.{i}.message", None)
             if msg:
-                test_log.append(f"> {msg.replace('\\n', '\n')}")
+                cleaned_msg = msg.replace('\\n', '\n')
+                test_log.append(f"> {cleaned_msg}")
         elif status == "fail":
             test_log.append(f"❌ {spec}")
             error = run.result.get(f"test.{i}.error", "No error information available")
             if error:
-                test_log.append(f"> {error.replace('\\n', '\n')}")
+                cleaned_error = error.replace('\\n', '\n')
+                test_log.append(f"> {cleaned_error}")
     if len(test_log) > 0:
         return str.join("\n", test_log)
     else:

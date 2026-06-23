@@ -202,7 +202,36 @@ def discover_erdos_min_overlap():
     )
 
     discover(config)
-    
+
+
+def discover_erdos_min_overlap_local():
+    config = DiscoverConfig(
+        env_type=ErdosMinOverlapEnv,
+        problem_type="",
+        model_name="Qwen/Qwen3-8B",
+        local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+        renderer_name="qwen3",
+        use_local_backend=True,
+        inference_gpu_id=0,
+        training_gpu_id=1,
+        group_size=2,
+        groups_per_batch=1,
+        num_epochs=1,
+        phase1_max_tokens=4000,
+        kl_penalty_coef=0.0,
+        lora_rank=32,
+        learning_rate=4e-5,
+        num_cpus_per_task=1,
+        eval_timeout=1100,
+        experiment_name="erdos-qwen3-8b-local",
+        wandb_project="erdos-min-overlap",
+    )
+    discover(config)
+
 
 if __name__ == "__main__":
-    discover_erdos_min_overlap()
+    import sys
+    if "--local" in sys.argv:
+        discover_erdos_min_overlap_local()
+    else:
+        discover_erdos_min_overlap()
