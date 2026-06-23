@@ -166,3 +166,176 @@ class TwoPhaseTokenCompleter(TokenCompleter):
             maybe_mask=[1.0] * len(phase1_tokens) + [0.0] * len(prefill_tokens) + [1.0] * len(phase2_tokens),
         )
 
+
+@dataclass
+class Qwen3TwoPhaseTokenCompleter(TokenCompleter):
+    """
+    Two-phase completer for Qwen3 with thinking mode.
+    Phase 1: model generates inside <think>...</think>
+    Phase 2: if thinking tokens exhausted, inject </think> to force code output.
+    """
+    sampling_client: object  # tinker.SamplingClient or LocalSamplingClient
+    tokenizer: Tokenizer
+    phase1_max_tokens: int
+    temperature: float = 1.0
+    context_window: int = 32768
+    context_buffer: int = 50
+
+    PHASE2_PREFILL = "\n\n... I need to give my final answer now.\n</think>\n"
+
+    def _hit_stop_sequence(self, tokens: list[int], stop: StopCondition) -> bool:
+        if not tokens:
+            return False
+        for s in stop:
+            if isinstance(s, int):
+                if tokens[-1] == s:
+                    return True
+            else:
+                stop_tokens = self.tokenizer.encode(s, add_special_tokens=False)
+                if len(stop_tokens) <= len(tokens) and tokens[-len(stop_tokens):] == stop_tokens:
+                    return True
+        return False
+
+    def _contains_subsequence(self, tokens: list[int], pattern: str) -> bool:
+        pattern_tokens = self.tokenizer.encode(pattern, add_special_tokens=False)
+        if len(pattern_tokens) > len(tokens):
+            return False
+        for i in range(len(tokens) - len(pattern_tokens) + 1):
+            if tokens[i:i + len(pattern_tokens)] == pattern_tokens:
+                return True
+        return False
+
+    async def __call__(self, model_input: tinker.ModelInput, stop: StopCondition) -> TokensWithLogprobs:
+        prompt_length = model_input.length
+
+        phase1_max = self.phase1_max_tokens - prompt_length
+        if phase1_max <= 0:
+            raise ValueError(f"Prompt length {prompt_length} exceeds phase1_max_tokens {self.phase1_max_tokens}.")
+
+        phase1_result = await self.sampling_client.sample_async(
+            prompt=model_input,
+            num_samples=1,
+            sampling_params=tinker.SamplingParams(stop=stop, max_tokens=phase1_max, temperature=self.temperature),
+        )
+        phase1_tokens = phase1_result.sequences[0].tokens
+        phase1_logprobs = phase1_result.sequences[0].logprobs
+        assert phase1_logprobs is not None
+
+        if self._hit_stop_sequence(phase1_tokens, stop) or len(phase1_tokens) < phase1_max:
+            return TokensWithLogprobs(tokens=phase1_tokens, maybe_logprobs=phase1_logprobs)
+
+        # Phase 2: thinking tokens exhausted
+        # If model already produced </think>, just continue
+        if self._contains_subsequence(phase1_tokens, "</think>"):
+            new_chunks = list(model_input.chunks) + [tinker.types.EncodedTextChunk(tokens=phase1_tokens)]
+            phase2_max = self.context_window - prompt_length - len(phase1_tokens) - self.context_buffer
+            if phase2_max <= 0:
+                return TokensWithLogprobs(tokens=phase1_tokens, maybe_logprobs=phase1_logprobs)
+            phase2_result = await self.sampling_client.sample_async(
+                prompt=tinker.ModelInput(chunks=new_chunks), num_samples=1,
+                sampling_params=tinker.SamplingParams(stop=stop, max_tokens=phase2_max, temperature=self.temperature),
+            )
+            phase2_tokens = phase2_result.sequences[0].tokens
+            phase2_logprobs = phase2_result.sequences[0].logprobs
+            assert phase2_logprobs is not None
+            return TokensWithLogprobs(
+                tokens=phase1_tokens + phase2_tokens,
+                maybe_logprobs=phase1_logprobs + phase2_logprobs,
+            )
+
+        # Inject </think> to force end of thinking
+        prefill_tokens = self.tokenizer.encode(self.PHASE2_PREFILL, add_special_tokens=False)
+        new_chunks = list(model_input.chunks) + [
+            tinker.types.EncodedTextChunk(tokens=phase1_tokens),
+            tinker.types.EncodedTextChunk(tokens=prefill_tokens),
+        ]
+        phase2_max = self.context_window - prompt_length - len(phase1_tokens) - len(prefill_tokens) - self.context_buffer
+        if phase2_max <= 0:
+            return TokensWithLogprobs(
+                tokens=phase1_tokens + prefill_tokens,
+                maybe_logprobs=phase1_logprobs + [0.0] * len(prefill_tokens),
+                maybe_mask=[1.0] * len(phase1_tokens) + [0.0] * len(prefill_tokens),
+            )
+
+        phase2_result = await self.sampling_client.sample_async(
+            prompt=tinker.ModelInput(chunks=new_chunks), num_samples=1,
+            sampling_params=tinker.SamplingParams(stop=stop, max_tokens=phase2_max, temperature=self.temperature),
+        )
+        phase2_tokens = phase2_result.sequences[0].tokens
+        phase2_logprobs = phase2_result.sequences[0].logprobs
+        assert phase2_logprobs is not None
+
+        return TokensWithLogprobs(
+            tokens=phase1_tokens + prefill_tokens + phase2_tokens,
+            maybe_logprobs=phase1_logprobs + [0.0] * len(prefill_tokens) + phase2_logprobs,
+            maybe_mask=[1.0] * len(phase1_tokens) + [0.0] * len(prefill_tokens) + [1.0] * len(phase2_tokens),
+        )
+
+    async def batch_call(
+        self, model_input: tinker.ModelInput, stop: StopCondition, num_samples: int
+    ) -> list[TokensWithLogprobs]:
+        """Batch generation: one prompt, N completions in a single vLLM call."""
+        prompt_length = model_input.length
+        phase1_max = self.phase1_max_tokens - prompt_length
+        if phase1_max <= 0:
+            raise ValueError(f"Prompt length {prompt_length} exceeds phase1_max_tokens {self.phase1_max_tokens}.")
+
+        phase1_result = await self.sampling_client.sample_async(
+            prompt=model_input,
+            num_samples=num_samples,
+            sampling_params=tinker.SamplingParams(stop=stop, max_tokens=phase1_max, temperature=self.temperature),
+        )
+
+        results: list[TokensWithLogprobs | None] = [None] * num_samples
+        phase2_indices: list[int] = []
+
+        for i, seq in enumerate(phase1_result.sequences):
+            if self._hit_stop_sequence(seq.tokens, stop) or len(seq.tokens) < phase1_max:
+                results[i] = TokensWithLogprobs(tokens=seq.tokens, maybe_logprobs=seq.logprobs)
+            else:
+                phase2_indices.append(i)
+
+        for i in phase2_indices:
+            seq = phase1_result.sequences[i]
+            p1_tok, p1_lp = seq.tokens, seq.logprobs
+
+            if self._contains_subsequence(p1_tok, "</think>"):
+                new_chunks = list(model_input.chunks) + [tinker.types.EncodedTextChunk(tokens=p1_tok)]
+                p2_max = self.context_window - prompt_length - len(p1_tok) - self.context_buffer
+                if p2_max <= 0:
+                    results[i] = TokensWithLogprobs(tokens=p1_tok, maybe_logprobs=p1_lp)
+                    continue
+                p2_r = await self.sampling_client.sample_async(
+                    prompt=tinker.ModelInput(chunks=new_chunks), num_samples=1,
+                    sampling_params=tinker.SamplingParams(stop=stop, max_tokens=p2_max, temperature=self.temperature),
+                )
+                results[i] = TokensWithLogprobs(
+                    tokens=p1_tok + p2_r.sequences[0].tokens,
+                    maybe_logprobs=p1_lp + p2_r.sequences[0].logprobs,
+                )
+            else:
+                pf_tok = self.tokenizer.encode(self.PHASE2_PREFILL, add_special_tokens=False)
+                new_chunks = list(model_input.chunks) + [
+                    tinker.types.EncodedTextChunk(tokens=p1_tok),
+                    tinker.types.EncodedTextChunk(tokens=pf_tok),
+                ]
+                p2_max = self.context_window - prompt_length - len(p1_tok) - len(pf_tok) - self.context_buffer
+                if p2_max <= 0:
+                    results[i] = TokensWithLogprobs(
+                        tokens=p1_tok + pf_tok,
+                        maybe_logprobs=p1_lp + [0.0] * len(pf_tok),
+                        maybe_mask=[1.0] * len(p1_tok) + [0.0] * len(pf_tok),
+                    )
+                    continue
+                p2_r = await self.sampling_client.sample_async(
+                    prompt=tinker.ModelInput(chunks=new_chunks), num_samples=1,
+                    sampling_params=tinker.SamplingParams(stop=stop, max_tokens=p2_max, temperature=self.temperature),
+                )
+                results[i] = TokensWithLogprobs(
+                    tokens=p1_tok + pf_tok + p2_r.sequences[0].tokens,
+                    maybe_logprobs=p1_lp + [0.0] * len(pf_tok) + p2_r.sequences[0].logprobs,
+                    maybe_mask=[1.0] * len(p1_tok) + [0.0] * len(pf_tok) + [1.0] * len(p2_r.sequences[0].tokens),
+                )
+
+        return results
+

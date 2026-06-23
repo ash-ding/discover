@@ -16,7 +16,7 @@ import tinker
 import torch
 from tinker.types import LossFnType
 from ttt_discover.tinker_utils.misc_utils import get_last_checkpoint, save_checkpoint_async
-from ttt_discover.tinker_utils.completers import TwoPhaseTokenCompleter
+from ttt_discover.tinker_utils.completers import TwoPhaseTokenCompleter, Qwen3TwoPhaseTokenCompleter
 from ttt_discover.rl.data_processing import (
     assemble_training_data,
     remove_constant_reward_groups,
@@ -301,9 +301,16 @@ class Config:
 
     # Two-phase sampling: phase1_max_tokens for token completion
     phase1_max_tokens: int = 26000
-    
+
     # Local model path (avoids HuggingFace API rate limits)
     local_model_path: str | None = None
+
+    # Local backend config
+    use_local_backend: bool = False
+    inference_gpu_id: int = 0
+    training_gpu_id: int = 1
+    inference_tp_size: int = 1
+    max_model_len: int = 32768
 
 
 @chz.chz
@@ -336,13 +343,22 @@ async def do_group_rollout_and_filter_constant_reward(
     from ttt_discover.tinker_utils.misc_utils import get_tokenizer
 
     tokenizer = get_tokenizer(model_name)
-    
-    policy = TwoPhaseTokenCompleter(
-        sampling_client=sampling_client,
-        tokenizer=tokenizer,
-        phase1_max_tokens=phase1_max_tokens,
-        temperature=temperature,
-    )
+
+    is_qwen3 = "qwen3" in model_name.lower() or "Qwen3" in model_name
+    if is_qwen3:
+        policy = Qwen3TwoPhaseTokenCompleter(
+            sampling_client=sampling_client,
+            tokenizer=tokenizer,
+            phase1_max_tokens=phase1_max_tokens,
+            temperature=temperature,
+        )
+    else:
+        policy = TwoPhaseTokenCompleter(
+            sampling_client=sampling_client,
+            tokenizer=tokenizer,
+            phase1_max_tokens=phase1_max_tokens,
+            temperature=temperature,
+        )
 
     trajectory_group = await do_group_rollout(env_group_builder, policy, step_idx)
 
@@ -583,7 +599,7 @@ async def do_sync_training(
                     )
             }
         
-        if len(ml_logger.loggers) >= 2:
+        if len(ml_logger.loggers) >= 3:
             if train_table is not None and isinstance(ml_logger.loggers[2], WandbLogger):
                 ml_logger.loggers[2].log_metrics(train_table, step=i_batch)
             if test_table is not None and isinstance(ml_logger.loggers[2], WandbLogger):
@@ -624,7 +640,18 @@ async def main(
         start_batch = 0
 
     print("Create training client...")
-    service_client = tinker.ServiceClient(base_url=None)
+    if cfg.use_local_backend:
+        from ttt_discover.local_backend import LocalServiceClient
+        service_client = LocalServiceClient(
+            model_name_or_path=cfg.local_model_path or cfg.model_name,
+            inference_gpu_id=cfg.inference_gpu_id,
+            training_gpu_id=cfg.training_gpu_id,
+            inference_tp_size=cfg.inference_tp_size,
+            max_model_len=cfg.max_model_len,
+            experiment_name=cfg.wandb_name or "default",
+        )
+    else:
+        service_client = tinker.ServiceClient(base_url=None)
     print("Training client created!")
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation

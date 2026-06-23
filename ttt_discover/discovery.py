@@ -36,6 +36,14 @@ class DiscoverConfig:
     experiment_name: str | None = None
     wandb_project: str | None = "tinker-cookbook"
 
+    # Local backend config
+    use_local_backend: bool = False
+    local_model_path: str | None = None
+    inference_gpu_id: int = 0
+    training_gpu_id: int = 1
+    inference_tp_size: int = 1
+    max_model_len: int = 32768
+
     # Environment-specific
     env_type: str = Environment
     problem_type: str = "26"
@@ -44,7 +52,10 @@ class DiscoverConfig:
 
 
 def init_ray(num_cpus_per_task: int, env_type: str):
+    import os
     import ray
+
+    os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
 
     if not ray.is_initialized():
         ray.init()
@@ -71,7 +82,8 @@ def init_ray(num_cpus_per_task: int, env_type: str):
 async def discover_impl(config: DiscoverConfig):
     """Convert discover config to full config and run training."""
 
-    assert config.model_name in {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}, "Only supporting GPT-OSS models for now."
+    if not config.use_local_backend:
+        assert config.model_name in {"openai/gpt-oss-120b", "openai/gpt-oss-20b"}, "Only supporting GPT-OSS models for now."
 
     # Ray is needed to dispatch jobs across cpus
     if config.num_cpus_per_task > 0:
@@ -121,7 +133,12 @@ async def discover_impl(config: DiscoverConfig):
         adv_estimator_beta=2.0, # Unused with entropic_adaptive_beta
         remove_constant_reward_groups=True,
         phase1_max_tokens=config.phase1_max_tokens,
-        local_model_path=None,
+        local_model_path=config.local_model_path,
+        use_local_backend=config.use_local_backend,
+        inference_gpu_id=config.inference_gpu_id,
+        training_gpu_id=config.training_gpu_id,
+        inference_tp_size=config.inference_tp_size,
+        max_model_len=config.max_model_len,
     )
 
     misc_utils.check_log_dir(log_path, behavior_if_exists="resume")

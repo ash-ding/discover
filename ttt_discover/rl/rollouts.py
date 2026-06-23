@@ -15,6 +15,38 @@ from ttt_discover.rl.types import (
 from ttt_discover.tinker_utils import logtree
 
 
+async def _do_batched_group_rollout(
+    policy, envs_G: Sequence[Env], step_idx: int
+) -> list[Trajectory]:
+    """Batched rollout: all envs share the same prompt, generate N completions in one vLLM call."""
+    obs_and_stops = [await env.initial_observation() for env in envs_G]
+    ob = obs_and_stops[0][0]
+    stop_condition = obs_and_stops[0][1]
+
+    t_policy_start = time.time()
+    all_completions = await policy.batch_call(ob, stop_condition, num_samples=len(envs_G))
+    t_policy = time.time() - t_policy_start
+
+    async def _step_env(env, ac_with_logprobs):
+        t_env_start = time.time()
+        step_result = await env.step(ac_with_logprobs.tokens, step_idx)
+        t_env = time.time() - t_env_start
+        step_metrics = dict(step_result.metrics) if step_result.metrics else {}
+        step_metrics["time/policy"] = t_policy / len(envs_G)
+        step_metrics["time/env_step"] = t_env
+        transition = Transition(
+            ob=ob, ac=ac_with_logprobs, reward=step_result.reward,
+            episode_done=step_result.episode_done, metrics=step_metrics,
+        )
+        return Trajectory(transitions=[transition], final_ob=step_result.next_observation)
+
+    trajectories = await asyncio.gather(*[
+        _step_env(env, completion)
+        for env, completion in zip(envs_G, all_completions)
+    ])
+    return list(trajectories)
+
+
 @logtree.scope_header_decorator
 async def do_single_rollout(policy: TokenCompleter, env: Env, step_idx: int) -> Trajectory:
     transitions = []
@@ -52,7 +84,11 @@ async def do_group_rollout(
     env_group_builder: EnvGroupBuilder, policy: TokenCompleter, step_idx: int
 ) -> TrajectoryGroup:
     envs_G: Sequence[Env] = await env_group_builder.make_envs()
-    trajectories_G = await asyncio.gather(*[do_single_rollout(policy, env, step_idx) for env in envs_G])
+
+    if hasattr(policy, 'batch_call') and len(envs_G) > 1:
+        trajectories_G = await _do_batched_group_rollout(policy, envs_G, step_idx)
+    else:
+        trajectories_G = await asyncio.gather(*[do_single_rollout(policy, env, step_idx) for env in envs_G])
 
     t_reward_start = time.time()
     rewards_and_metrics_G = await env_group_builder.compute_group_rewards(trajectories_G, envs_G)
