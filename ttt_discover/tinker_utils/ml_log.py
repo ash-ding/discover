@@ -352,13 +352,16 @@ class WandbLogger(Logger):
         # Initialize wandb run
         assert wandb is not None  # For type checker
         resume_mode = "allow" if run_id is not None else "never"
+        # Use offline mode if project doesn't exist or WANDB_MODE=offline is set
+        mode = os.environ.get("WANDB_MODE", "online")
         self.run = wandb.init(
             project=project,
             config=dump_config(config) if config else None,
             dir=str(log_dir) if log_dir else None,
             name=wandb_name,
             id=run_id,
-            resume=resume_mode
+            resume=resume_mode,
+            mode=mode
         )
 
     def log_hparams(self, config: Any) -> None:
@@ -433,26 +436,29 @@ def initialize_or_resume_wandb_logger(wandb_project, config, log_dir, wandb_name
       - WANDB_ENTITY and WANDB_API_KEY are set in the environment.
       - WandbLogger forwards unknown kwargs to `wandb.init` (for id/resume).
     """
-    api = wandb.Api()
-
-    # Entity: prefer env var, otherwise fall back to W&B's default entity
-    entity = os.environ.get("WANDB_ENTITY", None)
-    if entity is None:
-        entity = api.default_entity  # uses logged-in user/team
-
-    project_path = f"{entity}/{wandb_project}"
-
-    # Filter by run "Name" (API key is `display_name`)
-    runs = api.runs(project_path, filters={"display_name": wandb_name})
-
     latest_run_id = None
-    latest_created_at = None
 
-    # Find the most recent run with this name
-    for run in runs:
-        if latest_created_at is None or run.created_at > latest_created_at:
-            latest_created_at = run.created_at
-            latest_run_id = run.id
+    # Skip resume logic in offline mode (can't query API)
+    if os.environ.get("WANDB_MODE") != "offline":
+        api = wandb.Api()
+
+        # Entity: prefer env var, otherwise fall back to W&B's default entity
+        entity = os.environ.get("WANDB_ENTITY", None)
+        if entity is None:
+            entity = api.default_entity  # uses logged-in user/team
+
+        project_path = f"{entity}/{wandb_project}"
+
+        # Filter by run "Name" (API key is `display_name`)
+        runs = api.runs(project_path, filters={"display_name": wandb_name})
+
+        latest_created_at = None
+
+        # Find the most recent run with this name
+        for run in runs:
+            if latest_created_at is None or run.created_at > latest_created_at:
+                latest_created_at = run.created_at
+                latest_run_id = run.id
 
     # Construct your logger – assumes WandbLogger is already imported / defined
     logger = WandbLogger(
