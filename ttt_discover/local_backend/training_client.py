@@ -143,7 +143,7 @@ class LocalTrainingClient:
         loss_fn_outputs = []
         total_loss = 0.0
 
-        max_train_seq_len = 8192
+        max_train_seq_len = 32768
 
         for datum in data:
             prompt_ids = datum.model_input.to_ints()
@@ -247,28 +247,20 @@ class LocalTrainingClient:
 
     async def save_weights_and_get_sampling_client_async(self):
         path = os.path.join(self.checkpoint_dir, "latest_sampler")
+        path = os.path.abspath(path)
         os.makedirs(path, exist_ok=True)
         self.model.save_pretrained(path)
 
         if hasattr(self, "_shared_sampling_client") and self._shared_sampling_client is not None:
-            self._shared_sampling_client.update_lora(path)
+            await self._shared_sampling_client.update_lora(path)
             return self._shared_sampling_client
 
-        from ttt_discover.local_backend.sampling_client import LocalSamplingClient
-        return LocalSamplingClient(
-            model_name_or_path=self.model_name_or_path,
-            gpu_id=self.device.index or 0,
-            lora_adapter_path=path,
-        )
+        raise RuntimeError("No shared sampling client set")
 
-    def create_sampling_client(self, path: str):
+    async def create_sampling_client(self, path: str):
+        path = os.path.abspath(path)
         if hasattr(self, "_shared_sampling_client") and self._shared_sampling_client is not None:
-            self._shared_sampling_client.update_lora(path)
+            await self._shared_sampling_client.update_lora(path)
             return self._shared_sampling_client
 
-        from ttt_discover.local_backend.sampling_client import LocalSamplingClient
-        return LocalSamplingClient(
-            model_name_or_path=self.model_name_or_path,
-            gpu_id=self.device.index or 0,
-            lora_adapter_path=path,
-        )
+        raise RuntimeError("No shared sampling client set")
