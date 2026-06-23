@@ -11,9 +11,14 @@ We created `ttt_discover/local_backend/` — a drop-in adapter layer that replac
 
 | Tinker Component | Local Replacement | Implementation |
 |---|---|---|
-| `tinker.ServiceClient` | `LocalServiceClient` | Orchestrates inference/training clients |
+| `tinker.ServiceClient` | `LocalServiceClient` | Manages standalone vLLM process + training client |
 | `tinker.TrainingClient` | `LocalTrainingClient` | HuggingFace + PEFT LoRA training |
-| `tinker.SamplingClient` | `LocalSamplingClient` | vLLM inference engine |
+| `tinker.SamplingClient` | `LocalSamplingClient` | HTTP client to vLLM OpenAI-compatible API |
+
+**Architecture**: We run a **standalone vLLM V1 server** (with LoRA hot-reload support) that the training loop communicates with via HTTP. This enables:
+- **vLLM V1 chunked prefill** — prevents OOM on long sequences (32K tokens) with KL penalty computation
+- **Independent vLLM/training environments** — no version conflicts
+- **Runtime memory tuning** — `gpu_memory_utilization` and `max_num_seqs` configuration
 
 The RL algorithm (GRPO with entropic adaptive beta, PUCT state reuse) is **unchanged** from the original codebase.
 
@@ -58,14 +63,56 @@ Available requirements files:
 huggingface-cli download Qwen/Qwen3-8B --local-dir /path/to/models/Qwen3-8B
 ```
 
-### 3. Run a Task
+### 3. Start vLLM Server
 
-All tasks use `--local` flag to activate the local backend:
+**Start a standalone vLLM V1 server** before running any task. The training loop will connect to it via HTTP.
+
+```bash
+# Single-GPU inference (TP=1)
+CUDA_VISIBLE_DEVICES=0,1 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
+    python -m vllm.entrypoints.openai.api_server \
+    --model /path/to/models/Qwen3-8B \
+    --port 8000 \
+    --max-model-len 32768 \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --gpu-memory-utilization 0.70 \
+    --max-num-seqs 4 \
+    --disable-custom-all-reduce
+
+# Dual-GPU inference (TP=2, recommended for paper-scale experiments)
+CUDA_VISIBLE_DEVICES=0,1,2 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
+    python -m vllm.entrypoints.openai.api_server \
+    --model /path/to/models/Qwen3-8B \
+    --port 8000 \
+    --tensor-parallel-size 2 \
+    --max-model-len 32768 \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --gpu-memory-utilization 0.70 \
+    --max-num-seqs 4 \
+    --disable-custom-all-reduce
+```
+
+**Key parameters**:
+- `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` — enables `/v1/load_lora_adapter` endpoint for hot-reload
+- `gpu_memory_utilization=0.70` — leaves ~24 GiB for KL penalty logits computation (prevents OOM)
+- `max_num_seqs=4` — limits concurrent sequences to avoid memory spikes on long prompts
+- `max-model-len=32768` — KV cache length (lower = more concurrent batches, higher = longer sequences)
+
+Wait for `"Application startup complete"` before launching tasks.
+
+### 4. Run a Task
+
+In a **separate terminal**, launch the training loop with `--local` flag:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 WANDB_MODE=offline PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
     python -m examples.<task>.env --local
 ```
+
+**Note**: `CUDA_VISIBLE_DEVICES` must match what you used for vLLM (e.g., if vLLM uses GPUs 0-1 for TP=2, training needs GPU 2, so use `0,1,2`).
 
 ## Tasks
 
@@ -100,7 +147,7 @@ python -m examples.erdos_min_overlap.env --local
 python -m examples.ac_inequalities.env --local          # AC1 (minimize upper bound)
 python -m examples.ac_inequalities.env --local --ac2    # AC2 (maximize lower bound)
 
-# Circle Packing
+# Circle Packing (paper-config: 64x8, 50 epochs, KL=0.1, TP=2)
 python -m examples.circle_packing.env --local           # 26 circles
 python -m examples.circle_packing.env --local 32        # 32 circles
 ```
@@ -170,12 +217,12 @@ DiscoverConfig(
     local_model_path="/path/to/models/Qwen3-8B",
     renderer_name="qwen3",
 
-    # Local backend
+    # Local backend (Note: vLLM server started separately, see section 3)
     use_local_backend=True,
-    inference_gpu_id=0,          # vLLM uses cuda:0 through cuda:0+tp_size-1
-    training_gpu_id=4,           # Training on the GPU after inference GPUs
-    inference_tp_size=4,         # Tensor parallelism (1, 2, or 4)
-    max_model_len=8192,          # vLLM KV cache max length (lower = more concurrent samples)
+    inference_gpu_id=0,          # Must match vLLM server's first GPU
+    training_gpu_id=2,           # Training on the GPU after inference GPUs (TP=2 → GPU 2)
+    inference_tp_size=2,         # Tensor parallelism (must match vLLM --tensor-parallel-size)
+    max_model_len=32768,         # Must match vLLM --max-model-len
 
     # RL hyperparameters (match paper Table 9)
     lora_rank=32,
@@ -236,6 +283,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4 ... inference_gpu_id=0, training_gpu_id=4, infere
 ## Known Limitations
 
 - **Model capability gap**: Qwen3-8B (8B) vs paper's gpt-oss-120b (120B). Code generation quality will be lower.
-- **Training sequence truncation**: `max_train_seq_len=8192` truncates long sequences during training. Affects AHC tasks (~22K total). Solvable with TP=2 training.
 - **Serial Phase 2**: When Phase 1 thinking exhausts tokens, Phase 2 completions are processed one-by-one (different prefill per sample). Phase 1 is fully batched.
 - **vLLM custom all-reduce disabled**: `disable_custom_all_reduce=True` due to compatibility issues. Uses NCCL standard communication instead (minimal performance impact with NVLink).
+- **Standalone vLLM server**: Must be started manually before running tasks. Not auto-managed by the training loop.
