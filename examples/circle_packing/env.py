@@ -180,7 +180,7 @@ def discover_circle_packing_local(num_circles: str):
         save_every=2,
         num_cpus_per_task=1,
         eval_timeout=530,
-        experiment_name=f"circle-packing-{num_circles}-paper-config",
+        experiment_name=f"circle-packing-{num_circles}",
         wandb_project="circle-packing",
     )
     discover(config)

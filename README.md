@@ -67,20 +67,24 @@ huggingface-cli download Qwen/Qwen3-8B --local-dir /path/to/models/Qwen3-8B
 
 **Start a standalone vLLM V1 server** before running any task. The training loop will connect to it via HTTP.
 
+**Recommended (TP=4, paper configuration):**
 ```bash
-# Single-GPU inference (TP=1)
-CUDA_VISIBLE_DEVICES=0,1 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
+# 4-GPU inference (TP=4) + 1 GPU training = 5 GPUs total
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
     python -m vllm.entrypoints.openai.api_server \
     --model /path/to/models/Qwen3-8B \
     --port 8000 \
+    --tensor-parallel-size 4 \
     --max-model-len 32768 \
     --enable-lora \
     --max-lora-rank 64 \
-    --gpu-memory-utilization 0.70 \
-    --max-num-seqs 4 \
+    --gpu-memory-utilization 0.90 \
     --disable-custom-all-reduce
+```
 
-# Dual-GPU inference (TP=2, recommended for paper-scale experiments)
+**Alternative configurations** (fewer GPUs):
+```bash
+# TP=2: 3 GPUs total (GPUs 0-1 inference, GPU 2 training)
 CUDA_VISIBLE_DEVICES=0,1,2 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
     python -m vllm.entrypoints.openai.api_server \
     --model /path/to/models/Qwen3-8B \
@@ -89,30 +93,81 @@ CUDA_VISIBLE_DEVICES=0,1,2 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
     --max-model-len 32768 \
     --enable-lora \
     --max-lora-rank 64 \
-    --gpu-memory-utilization 0.70 \
-    --max-num-seqs 4 \
+    --gpu-memory-utilization 0.90 \
+    --disable-custom-all-reduce
+
+# TP=1: 2 GPUs total (GPU 0 inference, GPU 1 training)
+CUDA_VISIBLE_DEVICES=0,1 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
+    python -m vllm.entrypoints.openai.api_server \
+    --model /path/to/models/Qwen3-8B \
+    --port 8000 \
+    --max-model-len 32768 \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --gpu-memory-utilization 0.90 \
     --disable-custom-all-reduce
 ```
 
 **Key parameters**:
 - `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` — enables `/v1/load_lora_adapter` endpoint for hot-reload
-- `gpu_memory_utilization=0.70` — leaves ~24 GiB for KL penalty logits computation (prevents OOM)
-- `max_num_seqs=4` — limits concurrent sequences to avoid memory spikes on long prompts
-- `max-model-len=32768` — KV cache length (lower = more concurrent batches, higher = longer sequences)
+- `gpu_memory_utilization=0.90` — paper setting (allocate 90% of GPU memory to KV cache)
+- `max-model-len=32768` — maximum sequence length (must match DiscoverConfig.max_model_len)
+- `disable-custom-all-reduce` — required for compatibility
 
-Wait for `"Application startup complete"` before launching tasks.
+**Verify startup:**
+Wait for `"Application startup complete"`, then test:
+```bash
+curl http://localhost:8000/v1/models
+# Should return: {"data": [{"id": "Qwen/Qwen3-8B", ...}]}
+```
 
 ### 4. Run a Task
 
 In a **separate terminal**, launch the training loop with `--local` flag:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 WANDB_MODE=offline PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+# For TP=4 (5 GPUs): inference on 0-3, training on 4
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 WANDB_MODE=offline PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
     python -m examples.<task>.env --local
 ```
 
-**Note**: `CUDA_VISIBLE_DEVICES` must match what you used for vLLM (e.g., if vLLM uses GPUs 0-1 for TP=2, training needs GPU 2, so use `0,1,2`).
+**GPU allocation:** Training uses the GPU *after* the inference GPUs:
+- TP=1 (2 GPUs): `CUDA_VISIBLE_DEVICES=0,1` → inference on GPU 0, training on GPU 1
+- TP=2 (3 GPUs): `CUDA_VISIBLE_DEVICES=0,1,2` → inference on GPUs 0-1, training on GPU 2
+- TP=4 (5 GPUs): `CUDA_VISIBLE_DEVICES=0,1,2,3,4` → inference on GPUs 0-3, training on GPU 4
+
+**Estimated runtime (circle packing, 50 epochs):**
+- ~8-12 hours on 5×H100 80GB (TP=4)
+- ~15-20 hours on 3×H100 80GB (TP=2)
+
+## Quick Validation (5 minutes)
+
+Before launching a full 50-epoch run, verify your setup works:
+
+**Method 1: Modify config temporarily**
+```python
+# In examples/circle_packing/env.py, temporarily change:
+num_epochs=1,
+groups_per_batch=2,
+```
+
+Then run:
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 WANDB_MODE=offline \
+    VLLM_ALLOW_RUNTIME_LORA_UPDATING=true \
+    python -m examples.circle_packing.env --local
+```
+
+**Expected result:** 1 epoch completes in ~3-5 minutes with no OOM errors. You should see:
+- Rollout progress bars completing (2 groups × 64 completions)
+- KL penalty computation finishing without errors
+- Training step completing
+- Checkpoint saved to `tinker_log/circle-packing-26/`
+
+**Method 2: Use existing validation config** (if available in your fork)
+
+Revert the temporary changes before launching the full run.
 
 ## Tasks
 
@@ -279,6 +334,102 @@ CUDA_VISIBLE_DEVICES=0,1,2 ... inference_gpu_id=0, training_gpu_id=2, inference_
 # TP=4: 5 GPUs total (GPU 0-3 inference, GPU 4 training)
 CUDA_VISIBLE_DEVICES=0,1,2,3,4 ... inference_gpu_id=0, training_gpu_id=4, inference_tp_size=4
 ```
+
+## Troubleshooting
+
+### vLLM OOM during KL penalty computation
+**Symptom:** `torch.cuda.OutOfMemoryError: Tried to allocate X.XX GiB` during `incorporate_kl_penalty` step
+
+**Cause:** KL penalty computation requires computing logprobs for entire sequences with `echo=True`, creating large logits tensors `[seq_len, vocab_size]`. With many concurrent requests, this can exceed available GPU memory.
+
+**Fix:**
+1. **Lower gpu_memory_utilization** in vLLM startup command:
+   ```bash
+   --gpu-memory-utilization 0.80  # or 0.70 if still OOM
+   ```
+   This trades KV cache capacity for logits computation memory.
+
+2. **Reduce concurrent sequences** (if lowering GPU utilization isn't enough):
+   ```bash
+   --max-num-seqs 2  # limit concurrent requests
+   ```
+
+3. **Reduce sequence length** in `DiscoverConfig`:
+   ```python
+   phase1_max_tokens=20000,  # from 26000
+   max_model_len=24576,      # from 32768
+   ```
+
+### Training OOM
+**Symptom:** `torch.cuda.OutOfMemoryError` during the training step (after rollouts complete)
+
+**Cause:** Training GPU ran out of memory when processing long sequences.
+
+**Fix:**
+1. **Use a larger training GPU** (H100 80GB recommended for 32K sequences)
+2. **Lower max_model_len**:
+   ```python
+   max_model_len=16384,  # from 32768
+   ```
+3. **Check gradient checkpointing is enabled** (should be automatic in LocalTrainingClient)
+
+### "LoRA adapter not loaded" errors
+**Symptom:** vLLM returns `400 Bad Request: LoRA adapter 'lora_v1' not loaded`
+
+**Cause:** `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` environment variable not set when starting vLLM.
+
+**Fix:**
+1. Stop vLLM server (Ctrl+C)
+2. Restart with the environment variable:
+   ```bash
+   VLLM_ALLOW_RUNTIME_LORA_UPDATING=true python -m vllm.entrypoints.openai.api_server ...
+   ```
+
+### vLLM server doesn't start
+**Symptom:** `RuntimeError: CUDA error: out of memory` when starting vLLM
+
+**Cause:** Not enough GPU memory for the model with current settings.
+
+**Fix:**
+1. **Check GPUs are actually visible:**
+   ```bash
+   nvidia-smi
+   ```
+2. **Lower gpu_memory_utilization:**
+   ```bash
+   --gpu-memory-utilization 0.80
+   ```
+3. **Use more tensor parallelism** (if you have more GPUs):
+   ```bash
+   --tensor-parallel-size 4  # instead of 2
+   ```
+
+### Rollouts are very slow
+**Symptom:** Rollout progress bars take >30 seconds per completion
+
+**Cause:** vLLM not utilizing tensor parallelism efficiently, or wrong GPU allocation.
+
+**Check:**
+1. **Verify TP size matches:**
+   - vLLM command: `--tensor-parallel-size 4`
+   - Config: `inference_tp_size=4`
+2. **Check GPU utilization:**
+   ```bash
+   nvidia-smi dmon -s u
+   ```
+   All inference GPUs should show >70% utilization during rollouts.
+
+### "Connection refused" errors
+**Symptom:** `aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host localhost:8000`
+
+**Cause:** vLLM server not running or not ready yet.
+
+**Fix:**
+1. **Check vLLM is running:**
+   ```bash
+   curl http://localhost:8000/v1/models
+   ```
+2. **Wait for startup:** vLLM takes 30-60s to initialize. Look for `"Application startup complete"` in vLLM logs.
 
 ## Known Limitations
 

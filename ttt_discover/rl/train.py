@@ -55,17 +55,12 @@ async def incorporate_kl_penalty(
         datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
         for datum in data_D
     ]
-    # Batch KL penalty computation to avoid OOM
-    # echo=True requires full logits tensor which can't use chunked prefill
-    # With 512 trajectories (64x8), batch size of 16 is safe
-    KL_PENALTY_BATCH_SIZE = 16
-    base_logprobs_D = []
-    for i in range(0, len(full_sequence_inputs_D), KL_PENALTY_BATCH_SIZE):
-        batch = full_sequence_inputs_D[i:i+KL_PENALTY_BATCH_SIZE]
-        batch_results = await asyncio.gather(
-            *[base_sampling_client.compute_logprobs_async(seq) for seq in batch]
-        )
-        base_logprobs_D.extend(batch_results)
+    base_logprobs_D = await asyncio.gather(
+        *[
+            base_sampling_client.compute_logprobs_async(sequence_input)
+            for sequence_input in full_sequence_inputs_D
+        ]
+    )
     # compute the logprob differences, zeroed out when the mask == 0
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
     float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
