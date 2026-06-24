@@ -55,7 +55,7 @@ index fd871744..ede2257f 100644
          return adata.raw.to_adata()
      return adata
 diff --git a/openproblems/tasks/denoising/datasets/utils.py b/openproblems/tasks/denoising/datasets/utils.py
-index 1234567..abcdefg 100644
+index 3a91e9ce..d84762ea 100644
 --- a/openproblems/tasks/denoising/datasets/utils.py
 +++ b/openproblems/tasks/denoising/datasets/utils.py
 @@ -18,8 +18,8 @@ def split_data(
