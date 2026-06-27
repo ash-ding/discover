@@ -1,16 +1,18 @@
-# Erdős Minimum Overlap - Quick Validation Configuration
+# Qwen3-8B full validation: TP=4 inference (GPUs 0-3) + 4-GPU training (GPUs 4-7)
+# Paper-scale: group_size=64, groups_per_batch=8, 32K context
 
-problem_type: ""
+num_circles: 26
+
 model_name: "Qwen/Qwen3-8B"
 local_model_path: "/workspace/home/asherding/models/Qwen3-8B"
 renderer_name: "qwen3"
 use_local_backend: true
 
 inference_gpu_id: 0
-training_gpu_id: 4
 training_gpu_ids: [4, 5, 6, 7]
-inference_tp_size: 2
+inference_tp_size: 4
 max_model_len: 32768
+max_train_seq_len: 32768
 
 group_size: 64
 groups_per_batch: 8
@@ -19,13 +21,11 @@ phase1_max_tokens: 26000
 kl_penalty_coef: 0.1
 lora_rank: 32
 learning_rate: 4.0e-5
-training_batch_size: 1
 temperature: 1.0
 save_every: 1
+training_batch_size: 1
 
 num_cpus_per_task: 1
-eval_timeout: 1100
-
-experiment_name: "erdos-validate"
-wandb_project: "erdos-min-overlap"
-
+eval_timeout: 530
+experiment_name: "circle-packing-26-8b-distributed-validate"
+wandb_project: "circle-packing"

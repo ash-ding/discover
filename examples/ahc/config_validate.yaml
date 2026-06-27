@@ -14,6 +14,7 @@ use_local_backend: true
 # ============================================================================
 inference_gpu_id: 0
 training_gpu_id: 4
+training_gpu_ids: [4, 5, 6, 7]
 inference_tp_size: 4
 max_model_len: 32768
 max_train_seq_len: 8192   # Reduced to 8192 to avoid OOM (samples ~13400 tokens)
@@ -23,7 +24,7 @@ max_train_seq_len: 8192   # Reduced to 8192 to avoid OOM (samples ~13400 tokens)
 # ============================================================================
 group_size: 64
 groups_per_batch: 8
-num_epochs: 1                        # VALIDATION: 1 epoch (paper uses 50)
+num_epochs: 1
 phase1_max_tokens: 22000             # AHC uses 22000 (vs 26000 for other tasks)
 kl_penalty_coef: 0.01                # AHC uses 0.01 (vs 0.1 for other tasks)
 lora_rank: 32

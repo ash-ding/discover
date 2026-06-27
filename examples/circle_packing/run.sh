@@ -60,7 +60,7 @@ export VLLM_BASE_URL="http://localhost:8888"
 export WANDB_MODE="offline"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING="true"
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # Activate and run
 source ~/.bashrc

@@ -12,7 +12,8 @@ TTT-Discover is a research implementation of test-time training for LLMs using r
 
 ### Hardware Requirements
 - **Minimum**: 2x NVIDIA H100 80GB (1 for inference, 1 for training)
-- **Paper configuration**: 5x H100 80GB (4 for inference via TP=4, 1 for training)
+- **Default configuration**: 8x H100 80GB (4 for inference via TP=4, 4 for parallel training)
+- **Legacy configuration**: 5x H100 80GB (4 for inference, 1 for training)
 - CUDA Driver: 12.9+
 
 ### Environment Setup Pattern
@@ -144,20 +145,22 @@ python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
 
 ## Standard Workflow
 
-1. Start vLLM server once (shared across all tasks):
+1. Start vLLM server once (TP=4, GPUs 0-3, shared across all tasks):
    ```bash
    conda activate discover_math
    bash start_vllm.sh
    ```
 
-2. Run task with run.sh script:
+2. Run task (4-GPU parallel training on GPUs 4-7 by default):
    ```bash
    conda activate <correct_env>   # See mapping above
    cd examples/<task>
-   bash run.sh config_paper.yaml      # 50 epochs (paper config)
-   bash run.sh config_validate.yaml   # 1 epoch (quick validation)
-   bash run.sh /path/to/custom.yaml   # custom configuration
+   bash run.sh config_paper.yaml      # 50 epochs, 64×8 samples/step
+   bash run.sh config_validate.yaml   # 1 epoch, 64×8 samples/step
+   bash run.sh config_smoke_test.yaml # 1 epoch, 4×2 samples/step (quick)
    ```
+
+   All configs default to `training_gpu_ids: [4, 5, 6, 7]` for 4-GPU parallel training. For single-GPU fallback, remove `training_gpu_ids` and set `training_gpu_id: 4`.
 
 ### Available Tasks
 
@@ -203,24 +206,25 @@ This directory contains ~800 lines of adapter code that makes the original Tinke
 
 - **`LocalServiceClient`**: Entry point. Creates vLLM sampling client + local training client, manages GPU allocation
 - **`LocalSamplingClient`**: Wraps vLLM's OpenAI-compatible `/v1/completions` API. Handles LoRA hot-reload via `/v1/load_lora_adapter`
-- **`LocalTrainingClient`**: Implements HuggingFace Trainer + PEFT LoRA training. Uses gradient checkpointing and flash-attn to fit 32K sequences in 80GB
+- **`LocalTrainingClient`**: Single-GPU PEFT LoRA training with gradient checkpointing and flash-attn
+- **`DistributedTrainingClient`**: Multi-GPU parallel training using ThreadPoolExecutor. Each GPU holds a full model replica; data is split across GPUs, forward/backward runs in parallel, LoRA gradients are summed to the primary replica for optimizer step. Drop-in replacement activated by setting `training_gpu_ids` in config.
 - **`loss.py`**: Pure PyTorch implementations of importance sampling and PPO losses
 
 The interfaces match Tinker's SDK so `ttt_discover/rl/train.py` works with minimal changes.
 
 ## GPU Allocation Strategy
 
-vLLM always uses `cuda:0` through `cuda:tp_size-1`. Training uses the GPU after the inference GPUs.
+**Default (8 GPUs, 4+4)**: vLLM uses GPUs 0-3 (TP=4), training uses GPUs 4-7 (4-way data parallel).
 
 ```bash
-# TP=1 (2 GPUs): inference on 0, training on 1
-CUDA_VISIBLE_DEVICES=0,1 ... inference_gpu_id=0, training_gpu_id=1, inference_tp_size=1
+# Default: TP=4 inference + 4-GPU parallel training (8 GPUs)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ... inference_tp_size=4, training_gpu_ids=[4,5,6,7]
 
-# TP=2 (3 GPUs): inference on 0-1, training on 2
-CUDA_VISIBLE_DEVICES=0,1,2 ... inference_gpu_id=0, training_gpu_id=2, inference_tp_size=2
+# Legacy: TP=4 inference + single-GPU training (5 GPUs)
+CUDA_VISIBLE_DEVICES=0,1,2,3,4 ... inference_tp_size=4, training_gpu_id=4
 
-# TP=4 (5 GPUs): inference on 0-3, training on 4
-CUDA_VISIBLE_DEVICES=0,1,2,3,4 ... inference_gpu_id=0, training_gpu_id=4, inference_tp_size=4
+# Minimal: TP=1 inference + single-GPU training (2 GPUs)
+CUDA_VISIBLE_DEVICES=0,1 ... inference_tp_size=1, training_gpu_id=1
 ```
 
 ## Common Issues and Fixes
@@ -288,11 +292,21 @@ All tasks now use YAML configuration files (`config_paper.yaml`, `config_validat
 | `kl_penalty_coef` | `0.1` | **0.01** | **0.01** | KL penalty coefficient |
 | `lora_rank` | `32` | `32` | `32` | LoRA rank |
 | `learning_rate` | `4e-5` | **2e-5** | `4e-5` | Adam learning rate |
+| `training_gpu_ids` | `[4,5,6,7]` | same | same | Multi-GPU parallel training (4-way DP) |
+| `training_batch_size` | `1` | `1` | `1` | Per-GPU micro batch size (keep 1 for 32K) |
 
 **Task-specific parameter overrides** (bold = differs from default):
 - **AHC**: Lower all three key params (phase1_max_tokens, kl_penalty_coef, learning_rate)
 - **GPU Mode**: Lower kl_penalty_coef only
 - **All others**: Use default values from Table 9
+
+**Config tiers** (all use same hyperparameters, only scale differs):
+
+| Config | group_size | groups_per_batch | samples/step | epochs | Purpose |
+|--------|-----------|-----------------|-------------|--------|---------|
+| `config_paper.yaml` | 64 | 8 | 512 | 50 | Full paper reproduction |
+| `config_validate.yaml` | 64 | 8 | 512 | 1 | Pre-training verification |
+| `config_smoke_test.yaml` | 4 | 2 | 8 | 1 | Quick code validation |
 
 ## Testing
 

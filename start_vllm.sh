@@ -14,7 +14,7 @@ GPU_MEMORY_UTIL=${GPU_MEMORY_UTIL:-0.9}
 MAX_LORA_RANK=${MAX_LORA_RANK:-64}
 
 # GPU allocation (default: 5 GPUs for TP=4)
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 
 # ============================================================================
 # Display configuration
