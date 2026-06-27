@@ -121,6 +121,12 @@ class LocalTrainingClient:
         instance.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         instance.model.train()
 
+        # Fix: PEFT loads adapters with requires_grad=False by default
+        # Must explicitly set LoRA parameters as trainable after loading checkpoint
+        for name, param in instance.model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = True
+
         instance.optimizer = torch.optim.AdamW(
             [p for p in instance.model.parameters() if p.requires_grad],
             lr=4e-5,

@@ -126,15 +126,33 @@ python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
 # See .claude/skills/config-validation.md for detailed checks
 ```
 
+## Mandatory Rules
+
+1. **vLLM server always uses port 8888.** Never change the port. All configs, scripts, and code assume `http://localhost:8888`.
+
+2. **Always activate the correct conda environment before running a task.** The mapping is fixed:
+
+   | Task | Conda Environment |
+   |------|-------------------|
+   | Circle Packing, AC Inequalities, Erdos Min Overlap | `discover_math` |
+   | Denoising | `discover_denoising` |
+   | GPU Mode | `discover_gpumode` |
+   | AHC | `discover_ale` |
+   | vLLM server (start_vllm.sh) | `discover_math` |
+
+   Before running any task or starting vLLM, verify the active environment matches. Wrong environment causes cryptic import errors or CUDA mismatches.
+
 ## Standard Workflow
 
 1. Start vLLM server once (shared across all tasks):
    ```bash
+   conda activate discover_math
    bash start_vllm.sh
    ```
 
 2. Run task with run.sh script:
    ```bash
+   conda activate <correct_env>   # See mapping above
    cd examples/<task>
    bash run.sh config_paper.yaml      # 50 epochs (paper config)
    bash run.sh config_validate.yaml   # 1 epoch (quick validation)
@@ -149,7 +167,7 @@ python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
 | AC Inequalities | `discover_math` | `requirements-math.txt` | AC1 (minimize) or AC2 (maximize) |
 | Erdős Min Overlap | `discover_math` | `requirements-math.txt` | C₅ constant optimization |
 | Denoising | `discover_denoising` | `denoising/requirements-denoising.txt` | Requires openproblems patch |
-| GPU Mode | `discover_gpumode` | `requirements-gpumode.txt` | Requires Modal account |
+| GPU Mode | `discover_gpumode` | `requirements-gpumode.txt` | Local evaluation only |
 | AHC | `discover_ale` | `requirements-ahc.txt` | Must run in container |
 
 Each task has detailed documentation in its respective `examples/<task>/README.md`.
