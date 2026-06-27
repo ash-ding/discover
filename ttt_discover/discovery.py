@@ -31,6 +31,7 @@ class DiscoverConfig:
     temperature: float = 1.0
     kl_penalty_coef: float = 0.1
     phase1_max_tokens: int = 26000  # Two-phase sampling: total prompt + thinking token budget
+    training_batch_size: int = 1  # Batch size for training (1=serial, 2=batch training)
 
     # Misc config
     experiment_name: str | None = None
@@ -43,6 +44,7 @@ class DiscoverConfig:
     training_gpu_id: int = 1
     inference_tp_size: int = 1
     max_model_len: int = 32768
+    max_train_seq_len: int = 32768  # Maximum sequence length for training (truncates prompts if needed)
 
     # Environment-specific
     env_type: str = Environment
@@ -139,6 +141,8 @@ async def discover_impl(config: DiscoverConfig):
         training_gpu_id=config.training_gpu_id,
         inference_tp_size=config.inference_tp_size,
         max_model_len=config.max_model_len,
+        training_batch_size=config.training_batch_size,
+        max_train_seq_len=config.max_train_seq_len,
     )
 
     misc_utils.check_log_dir(log_path, behavior_if_exists="resume")

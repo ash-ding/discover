@@ -18,10 +18,14 @@ class LocalServiceClient:
         inference_tp_size: int = 1,
         max_model_len: int = 32768,
         experiment_name: str = "default",
+        training_batch_size: int = 1,
+        max_train_seq_len: int = 32768,
     ):
         self.model_name_or_path = model_name_or_path
         self.training_gpu_id = training_gpu_id
         self.experiment_name = experiment_name
+        self.training_batch_size = training_batch_size
+        self.max_train_seq_len = max_train_seq_len
         self.vllm_base_url = os.environ.get(
             "VLLM_BASE_URL", "http://localhost:8000"
         )
@@ -53,6 +57,8 @@ class LocalServiceClient:
             lora_rank=rank,
             gpu_id=self.training_gpu_id,
             checkpoint_dir=f"./tinker_log/local_checkpoints/{self.experiment_name}",
+            training_batch_size=self.training_batch_size,
+            max_train_seq_len=self.max_train_seq_len,
         )
         self._tokenizer = tc.get_tokenizer()
         inference_client = self._get_inference_client()
@@ -68,6 +74,8 @@ class LocalServiceClient:
             gpu_id=self.training_gpu_id,
             load_optimizer=False,
             checkpoint_dir=f"./tinker_log/local_checkpoints/{self.experiment_name}",
+            training_batch_size=self.training_batch_size,
+            max_train_seq_len=self.max_train_seq_len,
         )
         self._tokenizer = tc.get_tokenizer()
         inference_client = self._get_inference_client()
@@ -83,6 +91,8 @@ class LocalServiceClient:
             gpu_id=self.training_gpu_id,
             load_optimizer=True,
             checkpoint_dir=f"./tinker_log/local_checkpoints/{self.experiment_name}",
+            training_batch_size=self.training_batch_size,
+            max_train_seq_len=self.max_train_seq_len,
         )
         self._tokenizer = tc.get_tokenizer()
         inference_client = self._get_inference_client()

@@ -63,15 +63,10 @@ class LocalSamplingClient:
         return self._tokenizer
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if (
-            LocalSamplingClient._shared_session is None
-            or LocalSamplingClient._shared_session.closed
-        ):
-            connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
-            LocalSamplingClient._shared_session = aiohttp.ClientSession(
-                timeout=_TIMEOUT, connector=connector
-            )
-        return LocalSamplingClient._shared_session
+        # Create a new session for each request to avoid connection sharing issues
+        # when many concurrent requests hit connection errors simultaneously
+        connector = aiohttp.TCPConnector(limit=256, limit_per_host=256)
+        return aiohttp.ClientSession(timeout=_TIMEOUT, connector=connector)
 
     async def update_lora(self, adapter_path: str):
         adapter_path = os.path.abspath(adapter_path)
@@ -80,33 +75,35 @@ class LocalSamplingClient:
         self.lora_name = f"lora_v{self._lora_counter}"
 
         session = await self._get_session()
+        try:
+            # Unload old adapter first (V1 max_loras=1 requires this)
+            if old_name:
+                try:
+                    url = f"{self.base_url}/v1/unload_lora_adapter"
+                    async with session.post(
+                        url, json={"lora_name": old_name}
+                    ) as resp:
+                        if resp.status == 200:
+                            logger.info(f"Unloaded old LoRA adapter '{old_name}'")
+                except Exception:
+                    pass
 
-        # Unload old adapter first (V1 max_loras=1 requires this)
-        if old_name:
-            try:
-                url = f"{self.base_url}/v1/unload_lora_adapter"
-                async with session.post(
-                    url, json={"lora_name": old_name}
-                ) as resp:
-                    if resp.status == 200:
-                        logger.info(f"Unloaded old LoRA adapter '{old_name}'")
-            except Exception:
-                pass
-
-        url = f"{self.base_url}/v1/load_lora_adapter"
-        async with session.post(
-            url, json={"lora_name": self.lora_name, "lora_path": adapter_path}
-        ) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                if "already been loaded" in text:
-                    logger.info(f"LoRA adapter '{self.lora_name}' already loaded, skipping")
+            url = f"{self.base_url}/v1/load_lora_adapter"
+            async with session.post(
+                url, json={"lora_name": self.lora_name, "lora_path": adapter_path}
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    if "already been loaded" in text:
+                        logger.info(f"LoRA adapter '{self.lora_name}' already loaded, skipping")
+                    else:
+                        raise RuntimeError(
+                            f"Failed to load LoRA adapter ({resp.status}): {text}"
+                        )
                 else:
-                    raise RuntimeError(
-                        f"Failed to load LoRA adapter ({resp.status}): {text}"
-                    )
-            else:
-                logger.info(f"Loaded LoRA adapter '{self.lora_name}' from {adapter_path}")
+                    logger.info(f"Loaded LoRA adapter '{self.lora_name}' from {adapter_path}")
+        finally:
+            await session.close()
 
     async def sample_async(
         self,
@@ -139,15 +136,54 @@ class LocalSamplingClient:
         if self.lora_name:
             payload["model"] = self.lora_name
 
-        session = await self._get_session()
         url = f"{self.base_url}/v1/completions"
-        async with session.post(url, json=payload) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(
-                    f"vLLM sampling failed ({resp.status}): {text}"
-                )
-            data = await resp.json()
+
+        # Retry logic for transient network errors
+        import asyncio
+        import sys
+        max_retries = 3
+        retry_delay = 2.0
+
+        last_exception = None
+        session = None
+        try:
+            for attempt in range(max_retries):
+                try:
+                    # Get fresh session for each attempt
+                    if session:
+                        await session.close()
+                    session = await self._get_session()
+
+                    async with session.post(url, json=payload) as resp:
+                        if resp.status != 200:
+                            text = await resp.text()
+                            raise RuntimeError(
+                                f"vLLM sampling failed ({resp.status}): {text}"
+                            )
+                        data = await resp.json()
+                        break  # Success, exit retry loop
+                except (aiohttp.client_exceptions.ServerDisconnectedError,
+                        aiohttp.client_exceptions.ClientConnectionError) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        print(f"[sampling_client] Connection error (attempt {attempt+1}/{max_retries}): {type(e).__name__}, retrying in {retry_delay}s...", file=sys.stderr)
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        print(f"[sampling_client] Connection failed after {max_retries} attempts", file=sys.stderr)
+                        raise last_exception
+                except Exception as e:
+                    # Log detailed error info for debugging (non-retryable errors)
+                    print(f"[sampling_client] Request failed: {type(e).__name__}: {e}", file=sys.stderr)
+                    prompt_len = prompt.length if hasattr(prompt, 'length') else len(prompt)
+                    print(f"[sampling_client] Prompt length: {prompt_len} tokens", file=sys.stderr)
+                    print(f"[sampling_client] max_tokens: {sampling_params.max_tokens}", file=sys.stderr)
+                    raise
+        finally:
+            # Always close the session when done
+            if session:
+                await session.close()
 
         sequences: list[SampledSequence] = []
         for choice in data["choices"]:
