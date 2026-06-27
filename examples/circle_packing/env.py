@@ -1,7 +1,10 @@
 import inspect
 import numpy as np
+import os
+from pathlib import Path
 
 from ttt_discover import Environment, SandboxRewardEvaluator, State, DiscoverConfig, discover
+from ttt_discover.utils.config_loader import load_config
 
 
 # Verifier for circle packing
@@ -156,9 +159,71 @@ def discover_circle_packing(num_circles: str):
     discover(config)
 
 
-def discover_circle_packing_local(num_circles: str):
-    # Paper-matching configuration (Table 9 from TTT-Discover paper)
+def discover_circle_packing_local(num_circles: str, config_path: str = None):
+    # Load configuration from YAML file if provided
+    if config_path and os.path.exists(config_path):
+        print(f"Loading configuration from: {config_path}")
+        yaml_config = load_config(config_path)
+
+        config = DiscoverConfig(
+            env_type=CirclePackingEnv,
+            problem_type=str(yaml_config.get('num_circles', num_circles)),
+            model_name=yaml_config.get('model_name', 'Qwen/Qwen3-8B'),
+            local_model_path=yaml_config.get('local_model_path', '/workspace/home/asherding/models/Qwen3-8B'),
+            renderer_name=yaml_config.get('renderer_name', 'qwen3'),
+            use_local_backend=yaml_config.get('use_local_backend', True),
+            inference_gpu_id=yaml_config.get('inference_gpu_id', 0),
+            training_gpu_id=yaml_config.get('training_gpu_id', 4),
+            inference_tp_size=yaml_config.get('inference_tp_size', 4),
+            max_model_len=yaml_config.get('max_model_len', 32768),
+            group_size=yaml_config.get('group_size', 64),
+            groups_per_batch=yaml_config.get('groups_per_batch', 8),
+            num_epochs=yaml_config.get('num_epochs', 50),
+            phase1_max_tokens=yaml_config.get('phase1_max_tokens', 26000),
+            kl_penalty_coef=yaml_config.get('kl_penalty_coef', 0.1),
+            lora_rank=yaml_config.get('lora_rank', 32),
+            learning_rate=yaml_config.get('learning_rate', 4e-5),
+            temperature=yaml_config.get('temperature', 1.0),
+            save_every=yaml_config.get('save_every', 2),
+            num_cpus_per_task=yaml_config.get('num_cpus_per_task', 1),
+            eval_timeout=yaml_config.get('eval_timeout', 530),
+            experiment_name=yaml_config.get('experiment_name', f"circle-packing-{num_circles}"),
+            wandb_project=yaml_config.get('wandb_project', "circle-packing"),
+        )
+    else:
+        # Fallback to hardcoded paper configuration
+        print("Using hardcoded paper configuration (Table 9)")
+        config = DiscoverConfig(
+            env_type=CirclePackingEnv,
+            problem_type=num_circles,
+            model_name="Qwen/Qwen3-8B",
+            local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+            renderer_name="qwen3",
+            use_local_backend=True,
+            inference_gpu_id=0,
+            training_gpu_id=4,
+            inference_tp_size=4,
+            max_model_len=32768,
+            group_size=64,
+            groups_per_batch=8,
+            num_epochs=50,
+            phase1_max_tokens=26000,
+            kl_penalty_coef=0.1,
+            lora_rank=32,
+            learning_rate=4e-5,
+            save_every=2,
+            num_cpus_per_task=1,
+            eval_timeout=530,
+            experiment_name=f"circle-packing-{num_circles}",
+            wandb_project="circle-packing",
+        )
+    discover(config)
+
+
+def discover_circle_packing_validate(num_circles: str):
+    # Paper-exact validation configuration (1 epoch only)
     # Using TP=4 for inference (GPUs 0-3) + single GPU training (GPU 4)
+    # All parameters match Table 9 from TTT-Discover paper
     config = DiscoverConfig(
         env_type=CirclePackingEnv,
         problem_type=num_circles,
@@ -170,17 +235,17 @@ def discover_circle_packing_local(num_circles: str):
         training_gpu_id=4,
         inference_tp_size=4,
         max_model_len=32768,
-        group_size=64,
-        groups_per_batch=8,
-        num_epochs=50,
-        phase1_max_tokens=26000,
-        kl_penalty_coef=0.1,
-        lora_rank=32,
-        learning_rate=4e-5,
-        save_every=2,
+        group_size=64,              # Paper value
+        groups_per_batch=8,         # Paper value
+        num_epochs=1,               # Reduced from 50 for validation only
+        phase1_max_tokens=26000,    # Paper value
+        kl_penalty_coef=0.1,        # Paper value
+        lora_rank=32,               # Paper value
+        learning_rate=4e-5,         # Paper value
+        save_every=1,
         num_cpus_per_task=1,
         eval_timeout=530,
-        experiment_name=f"circle-packing-{num_circles}",
+        experiment_name=f"circle-packing-{num_circles}-paper-validate",
         wandb_project="circle-packing",
     )
     discover(config)
@@ -188,9 +253,16 @@ def discover_circle_packing_local(num_circles: str):
 
 if __name__ == "__main__":
     import sys
-    if "--local" in sys.argv:
+
+    # Check for config file from environment variable
+    config_path = os.getenv("TTT_CONFIG_PATH")
+
+    if "--validate" in sys.argv:
+        n = sys.argv[sys.argv.index("--validate") + 1] if len(sys.argv) > sys.argv.index("--validate") + 1 else "26"
+        discover_circle_packing_validate(n)
+    elif "--local" in sys.argv:
         n = sys.argv[sys.argv.index("--local") + 1] if len(sys.argv) > sys.argv.index("--local") + 1 else "26"
-        discover_circle_packing_local(n)
+        discover_circle_packing_local(n, config_path)
     else:
         num_circles = "26" # or "32"
         discover_circle_packing(num_circles)

@@ -154,27 +154,42 @@ def discover_ahc058():
 
 
 def discover_ahc039_local():
-    config = DiscoverConfig(
-        env_type=AhcEnv,
-        problem_type="ahc039",
-        model_name="Qwen/Qwen3-8B",
-        local_model_path="/workspace/home/asherding/models/Qwen3-8B",
-        renderer_name="qwen3",
-        use_local_backend=True,
-        inference_gpu_id=0,
-        training_gpu_id=1,
-        group_size=2,
-        groups_per_batch=1,
-        num_epochs=1,
-        phase1_max_tokens=22000,
-        kl_penalty_coef=0.0,
-        lora_rank=32,
-        learning_rate=4e-5,
-        num_cpus_per_task=CPUS_PER_TASK,
-        eval_timeout=530,
-        experiment_name="ahc039-qwen3-8b-local",
-        wandb_project="ahc-ahc039",
-    )
+    # Load config from YAML if TTT_CONFIG_PATH is set
+    import os
+    import inspect
+    config_path = os.getenv("TTT_CONFIG_PATH")
+    if config_path:
+        from ttt_discover.utils.config_loader import load_config
+        cfg = load_config(config_path)
+        # Filter out keys not in DiscoverConfig
+        valid_keys = set(inspect.signature(DiscoverConfig.__init__).parameters.keys())
+        cfg_filtered = {k: v for k, v in cfg.items() if k in valid_keys}
+        cfg_filtered['env_type'] = AhcEnv
+        cfg_filtered['problem_type'] = cfg.get('problem_type', 'ahc039')
+        config = DiscoverConfig(**cfg_filtered)
+    else:
+        print("WARNING: TTT_CONFIG_PATH not set, using fallback config")
+        config = DiscoverConfig(
+            env_type=AhcEnv,
+            problem_type="ahc039",
+            model_name="Qwen/Qwen3-8B",
+            local_model_path="/workspace/home/asherding/models/Qwen3-8B",
+            renderer_name="qwen3",
+            use_local_backend=True,
+            inference_gpu_id=0,
+            training_gpu_id=4,
+            group_size=64,
+            groups_per_batch=8,
+            num_epochs=1,
+            phase1_max_tokens=22000,
+            kl_penalty_coef=0.01,
+            lora_rank=32,
+            learning_rate=2e-5,
+            num_cpus_per_task=CPUS_PER_TASK,
+            eval_timeout=600,
+            experiment_name="ahc039-fallback",
+            wandb_project="ahc-ahc039",
+        )
     discover(config)
 
 
