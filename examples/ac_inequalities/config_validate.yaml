@@ -1,0 +1,31 @@
+# AC Inequalities - Quick Validation Configuration
+# Same as paper config but with 1 epoch for quick testing
+
+problem_type: "ac1"
+model_name: "Qwen/Qwen3-8B"
+local_model_path: "/workspace/home/asherding/models/Qwen3-8B"
+renderer_name: "qwen3"
+use_local_backend: true
+
+inference_gpu_id: 0
+training_gpu_id: 2
+inference_tp_size: 2
+max_model_len: 32768
+
+group_size: 64
+groups_per_batch: 8
+num_epochs: 1                        # 1 epoch for validation
+phase1_max_tokens: 26000
+kl_penalty_coef: 0.1
+lora_rank: 32
+learning_rate: 4.0e-5
+training_batch_size: 2
+temperature: 1.0
+save_every: 1
+
+num_cpus_per_task: 2
+eval_timeout: 1100
+
+experiment_name: "ac1-validate"
+wandb_project: "ac-inequalities"
+

@@ -1,0 +1,51 @@
+# Circle Packing - Custom Configuration
+# max_train_seq_len=16384, training_batch_size=2, num_epochs=10
+
+# ============================================================================
+# Task Configuration
+# ============================================================================
+num_circles: 26
+target_score: 2.636
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model_name: "Qwen/Qwen3-8B"
+local_model_path: "/workspace/home/asherding/models/Qwen3-8B"
+renderer_name: "qwen3"
+use_local_backend: true
+
+# ============================================================================
+# GPU Allocation
+# ============================================================================
+inference_gpu_id: 0
+training_gpu_id: 4
+inference_tp_size: 4
+max_model_len: 32768
+max_train_seq_len: 16384                 # 16K (down from 32K)
+
+# ============================================================================
+# Training Hyperparameters
+# ============================================================================
+group_size: 64
+groups_per_batch: 8
+num_epochs: 10                           # 10 epochs (down from 50)
+phase1_max_tokens: 26000
+kl_penalty_coef: 0.1
+lora_rank: 32
+learning_rate: 4.0e-5
+temperature: 1.0
+save_every: 2
+training_batch_size: 2                   # batch size=2 (same as paper)
+
+# ============================================================================
+# Environment Configuration
+# ============================================================================
+num_cpus_per_task: 1
+eval_timeout: 530
+
+# ============================================================================
+# Experiment Tracking
+# ============================================================================
+experiment_name: "circle-packing-26-16k-bs2-ep10"
+wandb_project: "circle-packing"

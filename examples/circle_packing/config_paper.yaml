@@ -1,0 +1,63 @@
+# Circle Packing - Paper Configuration (Table 9)
+# TTT-Discover: Test-Time Training for LLM Discovery
+
+# ============================================================================
+# Task Configuration
+# ============================================================================
+num_circles: 26                      # 26 or 32 circles
+target_score: 2.636                  # Paper target for 26 circles (2.940 for 32)
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model_name: "Qwen/Qwen3-8B"
+local_model_path: "/workspace/home/asherding/models/Qwen3-8B"
+renderer_name: "qwen3"
+use_local_backend: true
+
+# ============================================================================
+# GPU Allocation (Paper: TP=4, 5 GPUs total)
+# ============================================================================
+inference_gpu_id: 0                  # Starting GPU for inference
+training_gpu_id: 4                   # GPU for training (GPU 4)
+inference_tp_size: 4                 # Tensor Parallelism (GPUs 0-3 for inference)
+max_model_len: 32768                 # 32K context window (for vLLM inference)
+max_train_seq_len: 32768             # 32K max sequence length for training
+
+# ============================================================================
+# Training Hyperparameters (Paper Table 9)
+# ============================================================================
+group_size: 64                       # Completions per prompt
+groups_per_batch: 8                  # Different prompts per step (total: 64×8=512 samples/step)
+num_epochs: 50                       # Training epochs
+phase1_max_tokens: 26000             # Prompt + thinking token budget
+kl_penalty_coef: 0.1                 # KL divergence penalty coefficient
+lora_rank: 32                        # LoRA low-rank dimension
+learning_rate: 4.0e-5                # Adam learning rate (4e-5)
+temperature: 1.0                     # Sampling temperature
+save_every: 2                        # Save checkpoint every N epochs
+training_batch_size: 2               # Batch size for training (1=serial, 2=batch, paper uses 1)
+
+# ============================================================================
+# Environment Configuration
+# ============================================================================
+num_cpus_per_task: 1                 # CPUs per evaluation task
+eval_timeout: 530                    # Timeout for code execution (seconds)
+
+# ============================================================================
+# Experiment Tracking
+# ============================================================================
+experiment_name: "circle-packing-26-paper"
+wandb_project: "circle-packing"
+
+# ============================================================================
+# vLLM Server Configuration
+# ============================================================================
+
+# ============================================================================
+# Notes
+# ============================================================================
+# - This configuration exactly matches the paper (Table 9)
+# - For quick validation, set num_epochs to 1
+# - Expected runtime: ~40-50 hours for 50 epochs on 5×H100 80GB
+# - Target performance: sum of radii ≈ 2.636 for 26 circles

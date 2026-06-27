@@ -1,0 +1,54 @@
+# AHC - Smoke Test Configuration
+# Ultra-fast test with minimal rollouts: 8 samples × 2 groups = 16 samples/step
+
+# ============================================================================
+# Model Configuration
+# ============================================================================
+model_name: "Qwen/Qwen3-8B"
+local_model_path: "/workspace/home/asherding/models/Qwen3-8B"
+renderer_name: "qwen3"
+use_local_backend: true
+
+# ============================================================================
+# GPU Allocation
+# ============================================================================
+inference_gpu_id: 0
+training_gpu_id: 4
+inference_tp_size: 4
+max_model_len: 32768
+max_train_seq_len: 32768
+
+# ============================================================================
+# Training Hyperparameters (SMOKE TEST - Minimal)
+# ============================================================================
+group_size: 8                        # SMOKE TEST: 8 samples (vs 64)
+groups_per_batch: 2                  # SMOKE TEST: 2 prompts (vs 8)
+num_epochs: 1
+phase1_max_tokens: 22000             # AHC uses 22000 (vs 26000)
+kl_penalty_coef: 0.01                # AHC uses 0.01 (vs 0.1)
+lora_rank: 32
+learning_rate: 2.0e-5                # AHC uses 2e-5 (vs 4e-5)
+training_batch_size: 2
+temperature: 1.0
+save_every: 1
+
+# ============================================================================
+# Environment Configuration
+# ============================================================================
+num_cpus_per_task: 1
+eval_timeout: 530
+
+# ============================================================================
+# Experiment Tracking
+# ============================================================================
+experiment_name: "ahc-smoke"
+wandb_project: "ahc"
+
+# ============================================================================
+# Notes
+# ============================================================================
+# AHC uses different parameters than other tasks:
+# - phase1_max_tokens: 22000 (vs 26000)
+# - kl_penalty_coef: 0.01 (vs 0.1)
+# - learning_rate: 2e-5 (vs 4e-5)
+training_batch_size: 2
