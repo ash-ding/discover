@@ -236,7 +236,11 @@ tinker_log/
 openproblems/
 data/
 
-*.pdf
 
 # AHC test data cache (downloaded via get_cache.sh)
 examples/ahc/lib/cache/
+
+# Podman container storage (custom location to avoid disk space issues on /)
+.podman_storage/
+!.podman_storage/storage.conf  # Keep the config file in git
+*_logs
