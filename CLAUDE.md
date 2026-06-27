@@ -162,6 +162,12 @@ python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
 
    All configs default to `training_gpu_ids: [4, 5, 6, 7]` for 4-GPU parallel training. For single-GPU fallback, remove `training_gpu_ids` and set `training_gpu_id: 4`.
 
+3. **Always save a log file** when running experiments. Use `tee` to capture output while still showing it in the terminal:
+   ```bash
+   bash run.sh config_paper.yaml 2>&1 | tee ../../logs/<experiment_name>_$(date +%Y%m%d_%H%M%S).log
+   ```
+   `<experiment_name>` comes from the YAML config's `experiment_name` field (e.g. `circle-packing-26-paper`). Log files go in the project-root `logs/` directory (gitignored). These capture shell-level output (startup, environment, errors) complementing `tinker_log/<experiment_name>/train.log` which only has Python training logs.
+
 ### Available Tasks
 
 | Task | Environment | Requirements File | Notes |

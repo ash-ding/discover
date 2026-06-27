@@ -135,17 +135,20 @@ class LocalServiceClient:
         self, base_model: str | None = None
     ) -> LocalSamplingClient:
         """Return an HTTP client without LoRA — used for base model logprobs (KL penalty)."""
+        # Use the provided base_model parameter if given, otherwise fall back to self.model_name_or_path
+        model_to_use = base_model if base_model is not None else self.model_name_or_path
+
         if self._tokenizer is None:
             from transformers import AutoTokenizer
 
             self._tokenizer = AutoTokenizer.from_pretrained(
-                self.model_name_or_path,
+                model_to_use,
                 use_fast=True,
                 trust_remote_code=True,
             )
         return LocalSamplingClient(
             base_url=self.vllm_base_url,
-            model_name=self.model_name_or_path,
+            model_name=model_to_use,
             lora_name=None,
             tokenizer=self._tokenizer,
         )
