@@ -162,33 +162,26 @@ def discover_circle_packing(num_circles: str):
 def discover_circle_packing_local(num_circles: str, config_path: str = None):
     # Load configuration from YAML file if provided
     if config_path and os.path.exists(config_path):
+        import inspect
         print(f"Loading configuration from: {config_path}")
         yaml_config = load_config(config_path)
 
+        # Use num_circles from YAML if present, override problem_type
+        if 'num_circles' in yaml_config:
+            num_circles = str(yaml_config.pop('num_circles'))
+        # Remove non-DiscoverConfig keys
+        yaml_config.pop('target_score', None)
+
+        # Filter to valid DiscoverConfig parameters
+        valid_params = set(inspect.signature(DiscoverConfig.__init__).parameters.keys())
+        filtered_config = {k: v for k, v in yaml_config.items() if k in valid_params}
+
         config = DiscoverConfig(
             env_type=CirclePackingEnv,
-            problem_type=str(yaml_config.get('num_circles', num_circles)),
-            model_name=yaml_config.get('model_name', 'Qwen/Qwen3-8B'),
-            local_model_path=yaml_config.get('local_model_path', '/workspace/home/asherding/models/Qwen3-8B'),
-            renderer_name=yaml_config.get('renderer_name', 'qwen3'),
-            use_local_backend=yaml_config.get('use_local_backend', True),
-            inference_gpu_id=yaml_config.get('inference_gpu_id', 0),
-            training_gpu_id=yaml_config.get('training_gpu_id', 4),
-            inference_tp_size=yaml_config.get('inference_tp_size', 4),
-            max_model_len=yaml_config.get('max_model_len', 32768),
-            group_size=yaml_config.get('group_size', 64),
-            groups_per_batch=yaml_config.get('groups_per_batch', 8),
-            num_epochs=yaml_config.get('num_epochs', 50),
-            phase1_max_tokens=yaml_config.get('phase1_max_tokens', 26000),
-            kl_penalty_coef=yaml_config.get('kl_penalty_coef', 0.1),
-            lora_rank=yaml_config.get('lora_rank', 32),
-            learning_rate=yaml_config.get('learning_rate', 4e-5),
-            temperature=yaml_config.get('temperature', 1.0),
-            save_every=yaml_config.get('save_every', 2),
-            num_cpus_per_task=yaml_config.get('num_cpus_per_task', 1),
-            eval_timeout=yaml_config.get('eval_timeout', 530),
-            experiment_name=yaml_config.get('experiment_name', f"circle-packing-{num_circles}"),
-            wandb_project=yaml_config.get('wandb_project', "circle-packing"),
+            problem_type=num_circles,
+            num_cpus_per_task=1,
+            eval_timeout=530,
+            **filtered_config,
         )
     else:
         # Fallback to hardcoded paper configuration
