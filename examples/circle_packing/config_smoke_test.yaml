@@ -37,7 +37,7 @@ lora_rank: 32                        # LoRA low-rank dimension
 learning_rate: 4.0e-5                # Adam learning rate (4e-5)
 temperature: 1.0                     # Sampling temperature
 save_every: 1                        # Save checkpoint every N epochs
-training_batch_size: 2               # Batch size for training
+training_batch_size: 1               # Batch size for training
 
 # ============================================================================
 # Environment Configuration

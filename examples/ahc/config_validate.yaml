@@ -30,7 +30,7 @@ lora_rank: 32
 learning_rate: 2.0e-5                # AHC uses 2e-5 (vs 4e-5 for other tasks)
 temperature: 1.0
 save_every: 1
-training_batch_size: 2
+training_batch_size: 1
 
 # ============================================================================
 # Environment Configuration

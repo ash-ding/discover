@@ -224,27 +224,28 @@ class LocalSamplingClient:
         if len(token_ids) < 2:
             return [0.0] * len(token_ids)
 
-        tokenizer = self._get_tokenizer()
-        prompt_text = tokenizer.decode(token_ids, skip_special_tokens=False)
-
         payload: dict[str, Any] = {
-            "prompt": prompt_text,
+            "prompt": token_ids,
             "max_tokens": 1,
             "echo": True,
             "logprobs": 1,
+            "return_tokens_as_token_ids": True,
         }
         if self.lora_name:
             payload["model"] = self.lora_name
 
         session = await self._get_session()
-        url = f"{self.base_url}/v1/completions"
-        async with session.post(url, json=payload) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(
-                    f"vLLM logprobs failed ({resp.status}): {text}"
-                )
-            data = await resp.json()
+        try:
+            url = f"{self.base_url}/v1/completions"
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(
+                        f"vLLM logprobs failed ({resp.status}): {text}"
+                    )
+                data = await resp.json()
+        finally:
+            await session.close()
 
         choice = data["choices"][0]
         logprobs_data = choice.get("logprobs", {})

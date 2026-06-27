@@ -30,7 +30,7 @@ lora_rank: 32
 learning_rate: 4.0e-5
 temperature: 1.0
 save_every: 1
-training_batch_size: 2               # Reduced to 1 to avoid OOM
+training_batch_size: 1               # Reduced to 1 to avoid OOM
 
 # ============================================================================
 # Environment Configuration

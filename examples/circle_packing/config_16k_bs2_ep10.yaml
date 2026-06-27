@@ -36,7 +36,7 @@ lora_rank: 32
 learning_rate: 4.0e-5
 temperature: 1.0
 save_every: 2
-training_batch_size: 2                   # batch size=2 (same as paper)
+training_batch_size: 1                   # batch size=2 (same as paper)
 
 # ============================================================================
 # Environment Configuration

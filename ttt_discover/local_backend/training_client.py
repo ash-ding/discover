@@ -316,15 +316,14 @@ class LocalTrainingClient:
                 # Release batch logits
                 del logits, outputs
 
-                # Backward on batch average loss
-                avg_loss = batch_loss / actual_bs
-                avg_loss.backward()
-                total_loss += avg_loss.item()
+                # Backward on accumulated batch loss (no averaging — matches serial path)
+                batch_loss.backward()
+                total_loss += batch_loss.item()
 
         result = tinker.types.ForwardBackwardOutput(
             loss_fn_output_type=loss_fn,
             loss_fn_outputs=loss_fn_outputs,
-            metrics={"loss": total_loss / max(len(data) // batch_size if batch_size > 1 else len(data), 1)},
+            metrics={"loss": total_loss / max(len(data), 1)},
         )
         return LocalFuture(result)
 

@@ -179,8 +179,6 @@ def discover_circle_packing_local(num_circles: str, config_path: str = None):
         config = DiscoverConfig(
             env_type=CirclePackingEnv,
             problem_type=num_circles,
-            num_cpus_per_task=1,
-            eval_timeout=530,
             **filtered_config,
         )
     else:

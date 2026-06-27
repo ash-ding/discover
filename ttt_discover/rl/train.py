@@ -65,7 +65,6 @@ async def incorporate_kl_penalty(
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
     float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
 
-    # Fix: Align lengths to handle off-by-one errors from echo=True tokenization
     logprob_diffs = []
     for base_logprobs, sampled_logprobs, mask in safezip(
         base_logprobs_D, sampled_logprobs_D, float_masks
@@ -73,23 +72,20 @@ async def incorporate_kl_penalty(
         n_sampled = len(sampled_logprobs)
         n_base = len(base_logprobs)
 
-        # Handle length mismatch (common with echo=True + decode/encode)
-        if n_base == n_sampled:
-            # Perfect match
+        if n_base == n_sampled + 1:
+            # Normal case: echo returns logprobs for full sequence including
+            # the no-conditioning first token; skip it to align with sampled_logprobs
+            base_slice = torch.tensor(base_logprobs[1:])
+        elif n_base == n_sampled:
             base_slice = torch.tensor(base_logprobs)
-        elif n_base == n_sampled + 1:
-            # Base has 1 extra token (likely generated token from max_tokens=1)
-            base_slice = torch.tensor(base_logprobs[:-1])
-        elif n_base == n_sampled - 1:
-            # Base missing 1 token (rare, but pad with 0)
-            base_slice = torch.tensor(base_logprobs + [0.0])
-        elif n_base > n_sampled:
-            # Base longer - take last n_sampled tokens (original logic)
-            base_slice = torch.tensor(base_logprobs[-n_sampled:])
         else:
-            # Base shorter - pad with zeros
-            padding = [0.0] * (n_sampled - n_base)
-            base_slice = torch.tensor(base_logprobs + padding)
+            logger.warning(
+                f"KL logprob length mismatch: base={n_base}, sampled={n_sampled}. "
+                f"Falling back to best-effort alignment."
+            )
+            aligned = base_logprobs[1:] if n_base > n_sampled else base_logprobs
+            aligned = (aligned + [0.0] * n_sampled)[:n_sampled]
+            base_slice = torch.tensor(aligned)
 
         diff = (sampled_logprobs - base_slice) * mask
         logprob_diffs.append(diff)

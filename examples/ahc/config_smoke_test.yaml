@@ -28,7 +28,7 @@ phase1_max_tokens: 22000             # AHC uses 22000 (vs 26000)
 kl_penalty_coef: 0.01                # AHC uses 0.01 (vs 0.1)
 lora_rank: 32
 learning_rate: 2.0e-5                # AHC uses 2e-5 (vs 4e-5)
-training_batch_size: 2
+training_batch_size: 1
 temperature: 1.0
 save_every: 1
 
@@ -51,4 +51,4 @@ wandb_project: "ahc"
 # - phase1_max_tokens: 22000 (vs 26000)
 # - kl_penalty_coef: 0.01 (vs 0.1)
 # - learning_rate: 2e-5 (vs 4e-5)
-training_batch_size: 2
+training_batch_size: 1
