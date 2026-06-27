@@ -64,12 +64,35 @@ async def incorporate_kl_penalty(
     # compute the logprob differences, zeroed out when the mask == 0
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
     float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
-    logprob_diffs = [
-        (sampled_logprobs - torch.tensor(base_logprobs[1:])) * mask
-        for base_logprobs, sampled_logprobs, mask in safezip(
-            base_logprobs_D, sampled_logprobs_D, float_masks
-        )
-    ]
+
+    # Fix: Align lengths to handle off-by-one errors from echo=True tokenization
+    logprob_diffs = []
+    for base_logprobs, sampled_logprobs, mask in safezip(
+        base_logprobs_D, sampled_logprobs_D, float_masks
+    ):
+        n_sampled = len(sampled_logprobs)
+        n_base = len(base_logprobs)
+
+        # Handle length mismatch (common with echo=True + decode/encode)
+        if n_base == n_sampled:
+            # Perfect match
+            base_slice = torch.tensor(base_logprobs)
+        elif n_base == n_sampled + 1:
+            # Base has 1 extra token (likely generated token from max_tokens=1)
+            base_slice = torch.tensor(base_logprobs[:-1])
+        elif n_base == n_sampled - 1:
+            # Base missing 1 token (rare, but pad with 0)
+            base_slice = torch.tensor(base_logprobs + [0.0])
+        elif n_base > n_sampled:
+            # Base longer - take last n_sampled tokens (original logic)
+            base_slice = torch.tensor(base_logprobs[-n_sampled:])
+        else:
+            # Base shorter - pad with zeros
+            padding = [0.0] * (n_sampled - n_base)
+            base_slice = torch.tensor(base_logprobs + padding)
+
+        diff = (sampled_logprobs - base_slice) * mask
+        logprob_diffs.append(diff)
     avg_logp_diff = sum([diff.sum() for diff in logprob_diffs]) / sum(
         [mask.sum() for mask in float_masks]
     )
@@ -312,6 +335,8 @@ class Config:
     training_gpu_id: int = 1
     inference_tp_size: int = 1
     max_model_len: int = 32768
+    training_batch_size: int = 1  # Batch size for training (1=serial, 2+=batch training)
+    max_train_seq_len: int = 32768  # Maximum sequence length for training
 
 
 @chz.chz
@@ -656,6 +681,8 @@ async def main(
             inference_tp_size=cfg.inference_tp_size,
             max_model_len=cfg.max_model_len,
             experiment_name=cfg.wandb_name or "default",
+            training_batch_size=cfg.training_batch_size,
+            max_train_seq_len=cfg.max_train_seq_len,
         )
     else:
         service_client = tinker.ServiceClient(base_url=None)
