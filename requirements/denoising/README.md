@@ -1,37 +1,38 @@
 # OpenProblems Denoising Benchmark
 
-## Install uv
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
 
 ## Setup
 
 **Important**: Use Python 3.11 (not 3.12+).
 
-```bash
-cd /path/to/ttt-continuous
+**环境名**: `discover_denoising`
 
-uv venv .venv --python 3.11
-source .venv/bin/activate
+```bash
+cd /path/to/ttt-discover
+
+# 创建 conda 环境
+conda create -n discover_denoising python=3.11 -y
+conda activate discover_denoising
 
 # 1. Install requirements
-uv pip install -r requirements/denoising/requirements-denoising.txt
+pip install -r requirements/denoising/requirements-denoising.txt
 
-# 2. Git dependencies
-uv pip install git+https://github.com/czbiohub/simscity.git
-uv pip install --no-deps git+https://github.com/czbiohub/molecular-cross-validation.git
+# 2. Install FlashInfer
+pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/
 
-# 3. Clone and install openproblems (--no-deps to avoid version conflicts)
+# 3. Git dependencies
+pip install git+https://github.com/czbiohub/simscity.git
+pip install --no-deps git+https://github.com/czbiohub/molecular-cross-validation.git
+
+# 4. Clone and install openproblems (--no-deps to avoid version conflicts)
 git clone https://github.com/openproblems-bio/openproblems.git
 cd openproblems && git checkout v1.0.0 && cd ..
 
-# 4. Apply patch (MUST be done before installing)
+# 5. Apply patch (MUST be done before installing)
 cd openproblems && git apply ../requirements/denoising/openproblems_api_fix.patch && cd ..
 
-# 5. Install openproblems
-uv pip install --no-deps -e ./openproblems
+# 6. Install openproblems
+pip install --no-deps -e ./openproblems
 ```
 
 ## Why --no-deps for openproblems?

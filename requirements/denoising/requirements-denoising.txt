@@ -1,52 +1,85 @@
-# Core scientific
-numpy==2.3.5
-scipy==1.17.0
-scikit-learn==1.8.0
-pandas==2.3.3
-matplotlib==3.10.8
+# Denoising task: Single-cell RNA denoising
+# Environment: discover_denoising
+# Python: 3.11
 
-# Single-cell (openproblems/denoising)
-scanpy==1.11.5
-anndata==0.12.7
-scprep==1.1.0
-graphtools==2.1.0
-numba==0.63.1
-magic-impute==3.0.0
+# ⚠️ 重要：Denoising 任务需要额外的 Git 依赖和 openproblems 包
+# 请参考同目录的 README.md 获取完整安装说明
 
-# ML/DL
-torch==2.9.1
-transformers==4.57.5
-datasets==4.4.2
-tokenizers==0.22.2
-safetensors==0.7.0
-huggingface-hub==0.36.0
+# ============================================================================
+# 核心 RL 后端 (vLLM + PyTorch)
+# ============================================================================
+--extra-index-url https://download.pytorch.org/whl/cu129
+vllm>=0.22.0,<=0.23.0
 
-# Distributed/Training
-ray[client]==2.53.0
-submitit==1.5.4
-wandb==0.23.1
+# PEFT 和 Transformers
+peft>=0.19
+accelerate>=1.14
 
-# Config
-hydra-core==1.3.2
-omegaconf==2.3.0
-pydantic==2.12.5
-chz==0.4.0
+# OpenTelemetry (Ray 兼容性)
+opentelemetry-sdk>=1.42,<1.43
+opentelemetry-api>=1.42,<1.43
+opentelemetry-semantic-conventions>=0.48b0
+opentelemetry-exporter-otlp-proto-grpc>=1.42,<1.43
+opentelemetry-proto>=1.42,<1.43
+opentelemetry-exporter-prometheus>=0.63b1
+
+# ============================================================================
+# Denoising 任务依赖（单细胞数据分析）
+# ============================================================================
+# 科学计算
+numpy>=2.0
+scipy>=1.14
+scikit-learn>=1.5
+pandas>=2.2
+matplotlib>=3.9
+
+# 单细胞分析（兼容 numba 0.65 - 由 vLLM 控制）
+scanpy>=1.10
+anndata>=0.10
+scprep>=1.1
+graphtools>=2.1
+# numba 版本由 vLLM 决定（0.65.0）
+
+# 分布式
+ray>=2.50
+
+# 配置
+hydra-core>=1.3
+omegaconf>=2.3
+chz>=0.4
 
 # LLM APIs
-openai==2.15.0
-anthropic==0.76.0
+openai>=2.0
+anthropic>=0.70
 tiktoken
 litellm
 
-# Utils
-tqdm==4.67.1
-termcolor==3.3.0
-rich==14.2.0
-polars
+# 工具
+tqdm
+termcolor
+rich
 
 # Tinker
-tinker==0.7.0
+tinker>=0.7
 
-# Jupyter
-ipykernel==7.1.0
-jupyter
+# ============================================================================
+# 完整安装步骤
+# ============================================================================
+# 1. 安装基础依赖
+#    pip install -r requirements/requirements-denoising.txt
+#
+# 2. 安装 FlashInfer
+#    pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/
+#
+# 3. 安装 Git 依赖
+#    pip install git+https://github.com/czbiohub/simscity.git
+#    pip install --no-deps git+https://github.com/czbiohub/molecular-cross-validation.git
+#
+# 4. 克隆并安装 openproblems（需要应用补丁）
+#    cd /path/to/ttt-discover
+#    git clone https://github.com/openproblems-bio/openproblems.git
+#    cd openproblems && git checkout v1.0.0 && cd ..
+#    cd openproblems && git apply ../requirements/denoising/openproblems_api_fix.patch && cd ..
+#    pip install --no-deps -e ./openproblems
+#
+# 详细说明请参考同目录的 README.md
