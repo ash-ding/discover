@@ -333,6 +333,7 @@ class Config:
     max_model_len: int = 32768
     training_batch_size: int = 1  # Batch size for training (1=serial, 2+=batch training)
     max_train_seq_len: int = 32768  # Maximum sequence length for training
+    training_gpu_ids: list | None = None  # Multi-GPU training: list of GPU IDs
 
 
 @chz.chz
@@ -679,6 +680,7 @@ async def main(
             experiment_name=cfg.wandb_name or "default",
             training_batch_size=cfg.training_batch_size,
             max_train_seq_len=cfg.max_train_seq_len,
+            training_gpu_ids=cfg.training_gpu_ids,
         )
     else:
         service_client = tinker.ServiceClient(base_url=None)

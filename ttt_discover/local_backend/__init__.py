@@ -16,6 +16,7 @@ from ttt_discover.local_backend.types import (
 )
 from ttt_discover.local_backend.sampling_client import LocalSamplingClient
 from ttt_discover.local_backend.training_client import LocalTrainingClient
+from ttt_discover.local_backend.distributed_training_client import DistributedTrainingClient
 from ttt_discover.local_backend.service_client import LocalServiceClient
 from ttt_discover.local_backend.future import LocalFuture
 

@@ -45,6 +45,7 @@ class DiscoverConfig:
     inference_tp_size: int = 1
     max_model_len: int = 32768
     max_train_seq_len: int = 32768  # Maximum sequence length for training (truncates prompts if needed)
+    training_gpu_ids: list | None = None  # Multi-GPU training: list of GPU IDs (e.g. [4, 5])
 
     # Environment-specific
     env_type: str = Environment
@@ -143,6 +144,7 @@ async def discover_impl(config: DiscoverConfig):
         max_model_len=config.max_model_len,
         training_batch_size=config.training_batch_size,
         max_train_seq_len=config.max_train_seq_len,
+        training_gpu_ids=config.training_gpu_ids,
     )
 
     misc_utils.check_log_dir(log_path, behavior_if_exists="resume")
