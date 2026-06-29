@@ -267,3 +267,41 @@ async def save_checkpoint_async(
         f.write(json.dumps(full_dict) + "\n")
 
     return paths
+
+
+LATEST_RESUMABLE_NAME = "latest_resumable.json"
+
+
+def write_latest_resumable(log_path: str, batch: int, state_path: str):
+    """Write latest resumable state pointer for crash recovery.
+
+    Updated every training step so the most recent model weights + optimizer
+    can be recovered even between periodic checkpoints.
+    """
+    path = os.path.join(log_path, LATEST_RESUMABLE_NAME)
+    data = {"batch": batch, "state_path": os.path.abspath(state_path)}
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def get_latest_resumable(log_path: str) -> dict[str, Any] | None:
+    """Get the latest resumable state, which may be newer than the last checkpoint."""
+    path = os.path.join(log_path, LATEST_RESUMABLE_NAME)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        state_path = data.get("state_path", "")
+        if not os.path.isdir(state_path):
+            logger.warning(f"latest_resumable state_path missing: {state_path}")
+            return None
+        if not os.path.exists(os.path.join(state_path, "optimizer.pt")):
+            logger.warning(f"latest_resumable missing optimizer.pt in {state_path}")
+            return None
+        return data
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to read latest_resumable: {e}")
+        return None

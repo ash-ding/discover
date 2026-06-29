@@ -375,11 +375,14 @@ class LocalTrainingClient:
         """Set a shared sampling client to avoid re-creating vLLM engines."""
         self._shared_sampling_client = client
 
-    async def save_weights_and_get_sampling_client_async(self):
+    async def save_weights_and_get_sampling_client_async(self, step: int | None = None):
         path = os.path.join(self.checkpoint_dir, "latest_sampler")
         path = os.path.abspath(path)
         os.makedirs(path, exist_ok=True)
         self.model.save_pretrained(path)
+
+        if step is not None:
+            torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
 
         # Verify LoRA files are fully written before loading into vLLM
         adapter_config = os.path.join(path, "adapter_config.json")

@@ -283,11 +283,14 @@ class DistributedTrainingClient:
     def set_shared_sampling_client(self, client):
         self._shared_sampling_client = client
 
-    async def save_weights_and_get_sampling_client_async(self):
+    async def save_weights_and_get_sampling_client_async(self, step: int | None = None):
         path = os.path.join(self.checkpoint_dir, "latest_sampler")
         path = os.path.abspath(path)
         os.makedirs(path, exist_ok=True)
         self.replicas[0]["model"].save_pretrained(path)
+
+        if step is not None:
+            torch.save(self.optimizer.state_dict(), os.path.join(path, "optimizer.pt"))
 
         adapter_config = os.path.join(path, "adapter_config.json")
         adapter_weights = os.path.join(path, "adapter_model.safetensors")

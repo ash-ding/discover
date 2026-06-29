@@ -16,7 +16,7 @@ import ttt_discover.local_backend as tinker
 import torch
 from ttt_discover.local_backend.types import LossFnType
 from tqdm.asyncio import tqdm
-from ttt_discover.tinker_utils.misc_utils import get_last_checkpoint, save_checkpoint_async
+from ttt_discover.tinker_utils.misc_utils import get_last_checkpoint, get_latest_resumable, save_checkpoint_async, write_latest_resumable
 from ttt_discover.tinker_utils.completers import TwoPhaseTokenCompleter, Qwen3TwoPhaseTokenCompleter
 from ttt_discover.rl.data_processing import (
     assemble_training_data,
@@ -413,9 +413,15 @@ async def save_checkpoint_and_get_sampling_client(
                 loop_state={"batch": i_batch},
                 kind="both",
             )
+            write_latest_resumable(log_path, i_batch, path_dict["state_path"])
             return await training_client.create_sampling_client(path_dict["sampler_path"]), metrics
         else:
-            return await training_client.save_weights_and_get_sampling_client_async(), metrics
+            sampling_client = await training_client.save_weights_and_get_sampling_client_async(step=i_batch)
+            latest_sampler_path = os.path.join(
+                os.path.abspath(training_client.checkpoint_dir), "latest_sampler"
+            )
+            write_latest_resumable(log_path, i_batch, latest_sampler_path)
+            return sampling_client, metrics
 
 
 @scope
@@ -662,7 +668,18 @@ async def main(
         wandb_name=cfg.wandb_name,
     )
 
-    resume_info = get_last_checkpoint(cfg.log_path)
+    checkpoint_info = get_last_checkpoint(cfg.log_path)
+    latest_resumable = get_latest_resumable(cfg.log_path)
+
+    # Pick the most recent resumable state
+    if latest_resumable and (not checkpoint_info or latest_resumable["batch"] > checkpoint_info["batch"]):
+        resume_info = latest_resumable
+        logger.info(f"Using latest_resumable at step {resume_info['batch']} (newer than checkpoint)")
+    elif checkpoint_info:
+        resume_info = checkpoint_info
+    else:
+        resume_info = None
+
     if resume_info:
         start_batch = resume_info["batch"]
     else:
@@ -692,7 +709,7 @@ async def main(
                 resume_info["state_path"]
             )
         )
-        logger.info(f"Resumed training from {resume_info['state_path']}")
+        logger.info(f"Resumed training from {resume_info['state_path']} at step {start_batch}")
     elif cfg.load_checkpoint_path:
         # Starting fresh from a checkpoint - load weights only (fresh optimizer)
         training_client = await service_client.create_training_client_from_state_async(
