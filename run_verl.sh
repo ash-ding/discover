@@ -227,5 +227,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=2 \
     trainer.test_freq=-1 \
     trainer.total_epochs=${TOTAL_EPOCHS} \
+    trainer.rollout_data_dir=checkpoints/ttt-discover/${EXPERIMENT_NAME}/rollouts \
     trainer.val_before_train=False \
     "$@"
