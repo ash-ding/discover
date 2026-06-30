@@ -12,9 +12,9 @@ import chz
 import numpy as np
 import wandb
 import math
-import ttt_discover.local_backend as tinker
+import ttt_discover.compat.tinker_types as tinker
 import torch
-from ttt_discover.local_backend.types import LossFnType
+from ttt_discover.compat.tinker_types import LossFnType
 from tqdm.asyncio import tqdm
 from ttt_discover.tinker_utils.misc_utils import get_last_checkpoint, get_latest_resumable, save_checkpoint_async, write_latest_resumable
 from ttt_discover.tinker_utils.completers import TwoPhaseTokenCompleter, Qwen3TwoPhaseTokenCompleter
@@ -686,21 +686,11 @@ async def main(
         start_batch = 0
 
     print("Create training client...")
-    if cfg.use_local_backend:
-        from ttt_discover.local_backend import LocalServiceClient
-        service_client = LocalServiceClient(
-            model_name_or_path=cfg.local_model_path or cfg.model_name,
-            inference_gpu_id=cfg.inference_gpu_id,
-            training_gpu_id=cfg.training_gpu_id,
-            inference_tp_size=cfg.inference_tp_size,
-            max_model_len=cfg.max_model_len,
-            experiment_name=cfg.wandb_name or "default",
-            training_batch_size=cfg.training_batch_size,
-            max_train_seq_len=cfg.max_train_seq_len,
-            training_gpu_ids=cfg.training_gpu_ids,
-        )
-    else:
-        service_client = tinker.ServiceClient(base_url=None)
+    # Legacy local_backend path removed — use VERL integration instead.
+    # See ttt_discover/verl_integration/discover_trainer.py for the VERL-based training loop.
+    raise NotImplementedError(
+        "local_backend has been removed. Use ttt_discover.verl_integration.main instead."
+    )
     print("Training client created!")
     if resume_info:
         # Resuming interrupted training - load optimizer state for proper continuation

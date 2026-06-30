@@ -1,0 +1,50 @@
+# TTT-Discover + VERL config for Circle Packing task
+# 8xH100 colocate mode, FSDP SP=4 DP=2
+
+# Model
+model_name: "Qwen/Qwen3-8B"
+lora_rank: 32
+max_model_len: 32768
+
+# VERL infrastructure
+n_gpus: 8
+inference_tp_size: 4
+ulysses_sp_size: 4
+gpu_memory_utilization: 0.4
+
+# Training
+learning_rate: 4.0e-5
+clip_ratio: 1000.0  # no clipping (importance sampling loss)
+total_epochs: 50
+temperature: 1.0
+
+# RL algorithm
+group_size: 64
+groups_per_batch: 8
+kl_coef: 0.1
+phase1_max_tokens: 26000
+
+# Task environment
+env_module: "examples.circle_packing.env"
+env_class: "CirclePackingEnv"
+problem_type: "26"
+
+# Evaluation
+eval_timeout: 530
+num_cpus_per_task: 1
+
+# PUCT sampler
+puct_c: 1.0
+topk_children: 2
+max_buffer_size: 1000
+max_prompt_length: 4096
+
+# Logging
+log_dir: "./tinker_log"
+experiment_name: "circle-packing-26-verl"
+wandb_project: "ttt-discover"
+wandb_mode: "offline"
+save_freq: 2
+
+# Checkpointing
+puct_file_path: "./tinker_log/puct_sampler.json"

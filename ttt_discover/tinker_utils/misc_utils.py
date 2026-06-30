@@ -183,7 +183,7 @@ import logging
 import os
 from typing import Any, Literal
 
-import tinker
+import ttt_discover.compat.tinker_types as tinker
 
 from ttt_discover.tinker_utils.trace import scope, update_scope_context
 
@@ -238,7 +238,7 @@ def get_last_checkpoint(log_dir: str, required_key: str = "state_path") -> dict[
 
 @scope
 async def save_checkpoint_async(
-    training_client: tinker.TrainingClient,
+    training_client: Any,
     name: str,
     log_path: str,
     loop_state: dict[str, Any],

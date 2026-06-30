@@ -1,14 +1,53 @@
+"""Lightweight type shim preserving the tinker SDK interface used by non-backend code.
+
+Only data types needed by rl/, tinker_utils/, and environments/ are kept here.
+Training-specific types (Datum, ForwardBackwardOutput, etc.) are intentionally
+excluded — VERL handles those concerns.
+"""
+
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeVar, Union
+from typing import Any, Generic, TypeVar
 
 import torch
 
 T = TypeVar("T")
 
 LossFnType = str
+
+
+# Stub types for legacy code that references training/inference types.
+# These are no longer functional — VERL handles training and inference.
+class _Stub:
+    """Placeholder for removed types. Allows type annotations to resolve."""
+    pass
+
+SamplingClient = _Stub
+TrainingClient = _Stub
+ServiceClient = _Stub
+
+
+class APIFuture(Generic[T]):
+    """Stub for legacy APIFuture type annotations."""
+    pass
+
+
+class Datum:
+    """Stub for legacy Datum. See data_processing.py for the real conversion logic."""
+    def __init__(self, model_input=None, loss_fn_inputs=None):
+        self.model_input = model_input
+        self.loss_fn_inputs = loss_fn_inputs or {}
+
+
+class ForwardBackwardOutput:
+    """Stub."""
+    pass
+
+
+class OptimStepResponse:
+    """Stub."""
+    pass
 
 
 class ModelInputChunk:
@@ -68,24 +107,10 @@ class TensorData:
 
 
 @dataclass
-class Datum:
-    model_input: ModelInput
-    loss_fn_inputs: dict[str, TensorData]
-
-
-@dataclass
 class SamplingParams:
     stop: list[str] | list[int] = field(default_factory=list)
     max_tokens: int = 1024
     temperature: float = 1.0
-
-
-@dataclass
-class AdamParams:
-    learning_rate: float = 1e-4
-    beta1: float = 0.9
-    beta2: float = 0.95
-    eps: float = 1e-8
 
 
 @dataclass
@@ -99,29 +124,10 @@ class SampleResult:
     sequences: list[SampleSequence]
 
 
-@dataclass
-class ForwardBackwardOutput:
-    loss_fn_outputs: list[dict[str, TensorData]]
-    metrics: dict[str, Any] = field(default_factory=dict)
+# Expose a `types` sub-attribute so `tinker.types.EncodedTextChunk` works
+class _Types:
+    EncodedTextChunk = EncodedTextChunk
+    ModelInputChunk = ModelInputChunk
+    ModelInput = ModelInput
 
-
-@dataclass
-class OptimStepResponse:
-    path: str = ""
-
-
-@dataclass
-class SaveStateResponse:
-    path: str = ""
-
-
-class APIFuture(Generic[T]):
-    def __init__(self, value: T):
-        self._value = value
-
-    async def result_async(self) -> T:
-        return self._value
-
-    @classmethod
-    def from_value(cls, value: T) -> APIFuture[T]:
-        return cls(value)
+types = _Types()

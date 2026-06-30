@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import NotRequired, TypedDict, Literal, Protocol, TYPE_CHECKING, Any, TypeAlias
 from functools import cache
 
-import tinker
+import ttt_discover.compat.tinker_types as tinker
 import torch
 import pydantic
 
