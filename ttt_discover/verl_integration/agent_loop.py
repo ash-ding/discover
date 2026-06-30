@@ -581,5 +581,4 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             for worker, chunk in zip(self.agent_loop_workers, chunks, strict=False)
         ])
 
-        # Flush PUCT state after all rollouts complete
-        ray.get(self._puct_actor.flush.remote(self._global_steps))
+        # PUCT flush is handled by trainer's _save_latest_checkpoint() after training step

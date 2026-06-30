@@ -4,62 +4,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-TTT-Discover is a research implementation of test-time training for LLMs using reinforcement learning. The original codebase relied on the Tinker platform (remote LLM training service). This is a **local reproduction fork** that replaces Tinker with a local backend using **Qwen3-8B + vLLM (inference) + PEFT LoRA (training)**.
+TTT-Discover is a research implementation of test-time training for LLMs using reinforcement learning. This is a **local reproduction fork** using **VERL colocate mode** for RL training: all 8 GPUs are shared between inference (vLLM) and training (FSDP) via sleep/wake memory management.
 
-**Key Architecture Decision**: We run a **standalone vLLM V1 server** that the training loop communicates with via HTTP. The vLLM process is managed separately from the RL training loop.
+**Key Architecture Decision**: We use **VERL's colocated infrastructure** where vLLM inference and FSDP training alternate on the same GPUs. No manual vLLM server management needed.
 
 ## Critical Setup Requirements
 
 ### Hardware Requirements
-- **Minimum**: 2x NVIDIA H100 80GB (1 for inference, 1 for training)
-- **Default configuration**: 8x H100 80GB (4 for inference via TP=4, 4 for parallel training)
-- **Legacy configuration**: 5x H100 80GB (4 for inference, 1 for training)
+- **Required**: 8x NVIDIA H100 80GB (colocate mode — all GPUs shared)
 - CUDA Driver: 12.9+
 
-### Environment Setup Pattern
+### Environment Setup
 
-Each task has its own conda environment. **Installation order matters**:
-
-1. Install torch 2.11.0+cu129 first (from PyTorch index)
-2. Install vllm 0.23.0 second (auto-pulls torch 2.11 from wheels.vllm.ai)
-3. Install flashinfer from the specialized index third
-4. Install flash-attn last with special flags
+All tasks use a single unified conda environment `verl_discover`:
 
 ```bash
-conda create -n <env_name> python=3.11 -y
-conda activate <env_name>
-pip install -r requirements/requirements-<task>.txt
+conda create -n verl_discover python=3.11 -y
+conda activate verl_discover
+pip install -r requirements/requirements-base.txt
 pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/
-pip install flash-attn==2.8.3.post1 --no-build-isolation --no-cache-dir
+MAX_JOBS=8 pip install flash-attn --no-build-isolation --no-cache-dir
+pip install -e verl
 ```
 
-**Why this order?** Installing vllm before pinning torch can pull incompatible versions. Installing flashinfer before vllm can cause ABI incompatibility. Flash-attn must be installed last with --no-build-isolation to avoid rebuilding against wrong torch.
+See `requirements/README.md` for task-specific extra dependencies.
 
-### vLLM Server Must Run Separately
+### vLLM Server (Managed by VERL)
 
-**CRITICAL**: Before running any task, start the universal vLLM server in the root directory:
-
-```bash
-bash start_vllm.sh
-```
-
-This script starts vLLM with TP=4 by default (GPUs 0-3 for inference). Override with environment variables:
-
-```bash
-TENSOR_PARALLEL=2 VLLM_PORT=8000 GPU_MEMORY_UTIL=0.8 bash start_vllm.sh
-```
-
-**Key flags set by start_vllm.sh**:
-- `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` — enables hot-reload via `/v1/load_lora_adapter`
-- `--tensor-parallel-size=4` — uses GPUs 0-3 for inference
-- `--enable-lora --max-lora-rank=64` — LoRA support with max rank 64
-- `--gpu-memory-utilization=0.9` — configurable via GPU_MEMORY_UTIL env var
-- `--disable-custom-all-reduce` — required for compatibility (uses standard NCCL)
-
-Verify startup:
-```bash
-curl http://localhost:8888/v1/models
-```
+vLLM is managed automatically by VERL's colocate infrastructure. **No manual server management needed.** The `run_verl.sh` script handles everything.
 
 ## Configuration System
 
@@ -129,44 +101,26 @@ python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
 
 ## Mandatory Rules
 
-1. **vLLM server always uses port 8888.** Never change the port. All configs, scripts, and code assume `http://localhost:8888`.
+1. **Always activate `verl_discover` conda environment before running any task.** All tasks share this single environment.
 
-2. **Always activate the correct conda environment before running a task.** The mapping is fixed:
-
-   | Task | Conda Environment |
-   |------|-------------------|
-   | Circle Packing, AC Inequalities, Erdos Min Overlap | `discover_math` |
-   | Denoising | `discover_denoising` |
-   | GPU Mode | `discover_gpumode` |
-   | AHC | `discover_ale` |
-   | vLLM server (start_vllm.sh) | `discover_math` |
-
-   Before running any task or starting vLLM, verify the active environment matches. Wrong environment causes cryptic import errors or CUDA mismatches.
+2. **Never use conda `base` environment** to run or debug code.
 
 ## Standard Workflow
 
-1. Start vLLM server once (TP=4, GPUs 0-3, shared across all tasks):
-   ```bash
-   conda activate discover_math
-   bash start_vllm.sh
-   ```
+```bash
+conda activate verl_discover
 
-2. Run task (4-GPU parallel training on GPUs 4-7 by default):
-   ```bash
-   conda activate <correct_env>   # See mapping above
-   cd examples/<task>
-   bash run.sh config_paper.yaml      # 50 epochs, 64×8 samples/step
-   bash run.sh config_validate.yaml   # 1 epoch, 64×8 samples/step
-   bash run.sh config_smoke_test.yaml # 1 epoch, 4×2 samples/step (quick)
-   ```
+# Run any task (VERL manages vLLM internally, no manual server needed)
+TOTAL_EPOCHS=50 bash run_verl.sh circle_packing   # Full training
+TOTAL_EPOCHS=1  bash run_verl.sh circle_packing   # Validation (1 epoch)
 
-   All configs default to `training_gpu_ids: [4, 5, 6, 7]` for 4-GPU parallel training. For single-GPU fallback, remove `training_gpu_ids` and set `training_gpu_id: 4`.
+# Available tasks: circle_packing, cp32, ac1, ac2, erdos, denoising, gpu_mode, ahc039
+```
 
-3. **Always save a log file** when running experiments. Use `tee` to capture output while still showing it in the terminal:
-   ```bash
-   bash run.sh config_paper.yaml 2>&1 | tee ../../logs/<experiment_name>_$(date +%Y%m%d_%H%M%S).log
-   ```
-   `<experiment_name>` comes from the YAML config's `experiment_name` field (e.g. `circle-packing-26-paper`). Log files go in the project-root `logs/` directory (gitignored). These capture shell-level output (startup, environment, errors) complementing `tinker_log/<experiment_name>/train.log` which only has Python training logs.
+For AHC (long prompts), use SP=2 to avoid OOM:
+```bash
+TOTAL_EPOCHS=50 SP_SIZE=2 bash run_verl.sh ahc039
+```
 
 ### Available Tasks
 
@@ -188,49 +142,57 @@ Each task has detailed documentation in its respective `examples/<task>/README.m
 
 ```
 ttt_discover/
-├── discovery.py              # DiscoverConfig and main entry point
+├── verl_integration/        # VERL training backend
+│   ├── agent_loop.py        # Custom AgentLoop: PUCT + two-phase completion
+│   ├── verl_reward.py       # Reward function wrapper for sandbox evaluator
+│   ├── discover_trainer.py  # Custom trainer (legacy, for mock testing)
+│   ├── puct_data_source.py  # Dynamic PUCT-driven data source
+│   └── config/              # Task YAML configs
+├── compat/
+│   └── tinker_types.py      # Type compatibility shim for removed local_backend
 ├── rl/
-│   ├── train.py             # RL training loop, KL penalty computation
+│   ├── train.py             # Original RL training loop (reference, not used with VERL)
 │   ├── rollouts.py          # PUCT sampling, trajectory generation
 │   └── data_processing.py   # Advantage computation (entropic adaptive beta)
-├── local_backend/           # ⚠️ Custom replacement for Tinker SDK
-│   ├── service_client.py    # Orchestrates inference + training clients
-│   ├── sampling_client.py   # HTTP client to vLLM OpenAI API
-│   ├── training_client.py   # HuggingFace + PEFT LoRA training
-│   ├── loss.py             # importance_sampling_loss, ppo_clip_loss
-│   └── types.py            # Type definitions matching Tinker SDK
 ├── tinker_utils/
-│   ├── completers.py        # Qwen3TwoPhaseTokenCompleter (Phase 2 parsing)
-│   └── sampler.py          # PUCT state reuse
+│   ├── completers.py        # Qwen3TwoPhaseTokenCompleter (reference implementation)
+│   ├── sampler.py           # PUCT state reuse
+│   └── renderers.py         # Qwen3Renderer (prompt formatting)
 └── environments/
     └── sandbox_reward_evaluator.py  # Ray-based sandboxed code execution
+
+verl/                        # VERL fork with custom extensions
+├── verl/trainer/ppo/adv_estimators/
+│   └── entropic_adaptive_beta.py  # Custom advantage estimator
+└── verl/workers/utils/losses.py   # Fine-grained mask support
 ```
 
-### local_backend/ Design
+### verl_integration/ Design
 
-This directory contains ~800 lines of adapter code that makes the original Tinker-dependent codebase work locally:
+This directory contains the VERL integration layer (~600 lines):
 
-- **`LocalServiceClient`**: Entry point. Creates vLLM sampling client + local training client, manages GPU allocation
-- **`LocalSamplingClient`**: Wraps vLLM's OpenAI-compatible `/v1/completions` API. Handles LoRA hot-reload via `/v1/load_lora_adapter`
-- **`LocalTrainingClient`**: Single-GPU PEFT LoRA training with gradient checkpointing and flash-attn
-- **`DistributedTrainingClient`**: Multi-GPU parallel training using ThreadPoolExecutor. Each GPU holds a full model replica; data is split across GPUs, forward/backward runs in parallel, LoRA gradients are summed to the primary replica for optimizer step. Drop-in replacement activated by setting `training_gpu_ids` in config.
-- **`loss.py`**: Pure PyTorch implementations of importance sampling and PPO losses
+- **`agent_loop.py`**: Custom VERL AgentLoopManager with PUCT state reuse and two-phase token completion. Replaces VERL's default rollout with TTT-Discover's algorithm.
+- **`verl_reward.py`**: Wraps `SandboxRewardEvaluator` in VERL's `compute_score()` interface
+- **`puct_data_source.py`**: Dynamic prompt generation from PUCT sampler state
+- **`discover_trainer.py`**: Legacy custom trainer for mock/CPU testing
 
-The interfaces match Tinker's SDK so `ttt_discover/rl/train.py` works with minimal changes.
+VERL extensions (in `verl/` fork):
+- **`entropic_adaptive_beta.py`**: Custom advantage estimator with KL centered adjustment
+- **`losses.py`**: Fine-grained mask support for two-phase completion prefill tokens
+- **`bucketed_weight_transfer.py`**: IPC handle fix for PyTorch 2.11+
 
 ## GPU Allocation Strategy
 
-**Default (8 GPUs, 4+4)**: vLLM uses GPUs 0-3 (TP=4), training uses GPUs 4-7 (4-way data parallel).
+**VERL Colocate (8 GPUs shared)**: All GPUs alternate between inference and training via sleep/wake.
 
+```
+Inference phase: vLLM TP=4 × 2 replicas (all 8 GPUs, gpu_memory_utilization=0.85)
+Training phase:  FSDP DP=8 (all 8 GPUs, vLLM sleeps to release memory)
+```
+
+For long-sequence tasks (AHC), use sequence parallelism to reduce activation memory:
 ```bash
-# Default: TP=4 inference + 4-GPU parallel training (8 GPUs)
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 ... inference_tp_size=4, training_gpu_ids=[4,5,6,7]
-
-# Legacy: TP=4 inference + single-GPU training (5 GPUs)
-CUDA_VISIBLE_DEVICES=0,1,2,3,4 ... inference_tp_size=4, training_gpu_id=4
-
-# Minimal: TP=1 inference + single-GPU training (2 GPUs)
-CUDA_VISIBLE_DEVICES=0,1 ... inference_tp_size=1, training_gpu_id=1
+SP_SIZE=2 bash run_verl.sh ahc039   # SP=2, DP=4
 ```
 
 ## Common Issues and Fixes
@@ -330,16 +292,14 @@ No automated test suite. Validation is done via:
 ## Output Structure
 
 ```
-tinker_log/<experiment_name>/
-├── metrics.jsonl              # Per-step scores, rewards, advantages
-├── checkpoints.jsonl          # Checkpoint path index
-├── config.json               # Training config snapshot
-└── train.log                 # Python logs
-
-tinker_log/local_checkpoints/<experiment_name>/
-├── state_<step>/             # LoRA weights + optimizer (for resume)
-├── sampler_<step>/           # LoRA weights only (for evaluation)
-└── latest_sampler/           # Current LoRA (vLLM hot-reloads from here)
+checkpoints/ttt-discover/<experiment_name>/
+├── latest/                          # Every step (crash recovery)
+│   ├── actor/                       # LoRA weights + optimizer state
+│   └── data.pt                      # Dataloader state
+├── global_step_N/                   # Every N steps (analysis)
+│   └── actor/                       # LoRA weights only
+├── puct_sampler.json                # PUCT state (every step)
+└── latest_checkpointed_iteration.txt # Current step number
 ```
 
 ## Creating Custom Environments
@@ -357,14 +317,11 @@ The RL algorithm (GRPO, entropic adaptive beta, PUCT state reuse) is unchanged f
 | Aspect | Original | This Fork |
 |--------|----------|-----------|
 | Model | gpt-oss-120b | Qwen3-8B |
-| PyTorch | N/A | 2.11.0+cu129 |
-| vLLM | Tinker remote service | vLLM 0.23.0 local server |
-| FlashInfer | N/A | 0.6.12 (cu129/torch2.11) |
-| Flash-Attn | N/A | 2.8.3.post1 |
-| CUDA Driver | N/A | 12.9+ |
-| Inference | Tinker auto-managed | Manual vLLM server (TP=4) |
-| Training | Tinker remote | Local PEFT LoRA |
-| vLLM management | Auto-managed by Tinker | Manual (bash start_vllm.sh) |
+| Training framework | Tinker remote service | VERL colocate (FSDP + vLLM) |
+| GPU allocation | Tinker auto-managed | 8-GPU colocate with sleep/wake |
+| Inference | Tinker auto-managed | VERL-managed vLLM (TP=4, 2 replicas) |
+| Training | Tinker remote | FSDP DP=8 with LoRA |
+| Environment | Multiple conda envs | Single `verl_discover` env |
 | Phase 2 marker | Channel tokens | `</think>` tag |
 | Max train seq len | Unlimited | 32768 (32K) |
 
@@ -379,14 +336,15 @@ The RL algorithm (GRPO, entropic adaptive beta, PUCT state reuse) is unchanged f
 
 ## Development Workflow
 
-When modifying the local backend:
+When modifying the VERL integration:
 
-1. Changes to sampling/inference → edit `ttt_discover/local_backend/sampling_client.py`
-2. Changes to training → edit `ttt_discover/local_backend/training_client.py`
-3. Changes to loss functions → edit `ttt_discover/local_backend/loss.py`
-4. Changes to RL algorithm → edit `ttt_discover/rl/train.py` or `ttt_discover/rl/rollouts.py`
+1. Changes to rollout/generation → edit `ttt_discover/verl_integration/agent_loop.py`
+2. Changes to advantage computation → edit `verl/verl/trainer/ppo/adv_estimators/entropic_adaptive_beta.py`
+3. Changes to reward evaluation → edit `ttt_discover/verl_integration/verl_reward.py`
+4. Changes to PUCT logic → edit `ttt_discover/tinker_utils/sampler.py`
+5. Adding a new task → create `examples/<task>/env.py`, add case to `run_verl.sh`, create parquet in `data/`
 
-The local_backend is **task-agnostic**. If you add support for a new RL task, you should not need to modify local_backend/ — only create a new env.py and reward evaluator.
+The VERL integration is **task-agnostic**. Custom AgentLoop reads task config from environment variables set by `run_verl.sh`.
 
 ## WandB Configuration
 
