@@ -46,6 +46,20 @@ TOTAL_EPOCHS=1  bash run_verl.sh circle_packing   # 1-epoch validation
 
 No manual vLLM server management needed — VERL handles everything internally.
 
+### Resume Training
+
+```bash
+# Resume in same directory (crash recovery)
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run INPLACE=true bash run_verl.sh circle_packing
+
+# Resume to new directory (preserve old results)
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run bash run_verl.sh circle_packing
+
+# Cross-config resume (e.g., 8 GPU → 16 GPU)
+python scripts/export_lora.py checkpoints/ttt-discover/my-run/latest/actor  # Export LoRA first
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run bash run_verl.sh circle_packing
+```
+
 ## Available Tasks
 
 | Task | Command | LR | KL Coef | Notes |

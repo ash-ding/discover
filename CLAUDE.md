@@ -140,6 +140,20 @@ For AHC (long prompts), use SP=2 to avoid OOM:
 TOTAL_EPOCHS=50 SP_SIZE=2 bash run_verl.sh ahc039
 ```
 
+### Resume Training
+
+```bash
+# Same-dir resume (crash recovery, overwrites latest)
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run INPLACE=true bash run_verl.sh circle_packing
+
+# New-dir resume (preserves old results)
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run bash run_verl.sh circle_packing
+
+# Cross-config resume (different GPU count) — export LoRA first
+python scripts/export_lora.py checkpoints/ttt-discover/my-run/latest/actor
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run bash run_verl.sh circle_packing
+```
+
 ### Available Tasks
 
 | Task | Environment | Requirements File | Notes |
@@ -312,12 +326,23 @@ No automated test suite. Validation is done via:
 ```
 checkpoints/ttt-discover/<experiment_name>/
 ├── latest/                          # Every step (crash recovery)
-│   ├── actor/                       # LoRA weights + optimizer state
+│   ├── actor/                       # FSDP sharded weights + optimizer
+│   │   ├── model_world_size_8_rank_*.pt
+│   │   ├── optim_world_size_8_rank_*.pt
+│   │   ├── fsdp_config.json         # Parallel config (world_size)
+│   │   ├── lora_train_meta.json     # LoRA rank/alpha
+│   │   └── exported_lora/           # (optional) PEFT adapter for cross-config resume
 │   └── data.pt                      # Dataloader state
-├── global_step_N/                   # Every N steps (analysis)
-│   └── actor/                       # LoRA weights only
-├── puct_sampler.json                # PUCT state (every step)
+├── rollouts/                        # Per-step rollout logs
+│   └── N.jsonl                      # Prompt + response + reward
+├── puct_sampler_step_*.json         # PUCT state history
 └── latest_checkpointed_iteration.txt # Current step number
+```
+
+**LoRA export** (for cross-config resume or analysis):
+```bash
+python scripts/export_lora.py checkpoints/ttt-discover/my-run/latest/actor
+# → creates exported_lora/adapter_model.safetensors (~80MB)
 ```
 
 ## Creating Custom Environments
