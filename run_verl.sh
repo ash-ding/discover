@@ -268,4 +268,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=False \
     trainer.resume_mode=${RESUME_MODE} \
     ${RESUME_PATH:+trainer.resume_from_path=${RESUME_PATH}} \
+    ${NNODES:+$([ "$NNODES" -gt 1 ] && echo "+ray_kwargs.ray_init.address=auto" || true)} \
     "$@"
