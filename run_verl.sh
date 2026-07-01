@@ -147,6 +147,7 @@ esac
 ########################### Shared config ###########################
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+NNODES=${NNODES:-1}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 ROLLOUT_N=${ROLLOUT_N:-64}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
@@ -259,7 +260,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.project_name=ttt-discover \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
-    trainer.nnodes=1 \
+    trainer.nnodes=${NNODES} \
     trainer.save_freq=${SAVE_FREQ:-0} \
     trainer.test_freq=-1 \
     trainer.total_epochs=${TOTAL_EPOCHS} \
