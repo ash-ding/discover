@@ -30,7 +30,17 @@ git submodule update --init --recursive
 
 ### Hardware Requirements
 - **Required**: 8x NVIDIA H100 80GB (colocate mode — all GPUs shared)
+- **Optional second node**: 8x H100 for multi-node training (16 GPUs total)
 - CUDA Driver: 12.9+
+
+### Cluster Nodes
+
+| Node | Hostname | IP | Role |
+|------|----------|-----|------|
+| Node 0 | ai-innovation-h100-10-preserve | 10.241.128.30 | Head (default) |
+| Node 1 | ai-innovation-h100-11-preserve | 10.241.128.16 | Worker (optional) |
+
+Override via `HEAD_NODE` and `WORKER_NODE` env vars. SSH must be passwordless between nodes.
 
 ### Environment Setup
 
