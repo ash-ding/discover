@@ -31,6 +31,12 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib/python3.11/site-packages/nvidia/cu13
 # Reduce CUDA memory fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Multi-node communication: force IPv4 on eth0
+export NCCL_SOCKET_IFNAME=eth0
+export GLOO_SOCKET_IFNAME=eth0
+export NCCL_IB_DISABLE=0
+export NCCL_NET_GDR_LEVEL=2
+
 ########################### Task-specific config ###########################
 case "${TASK}" in
     circle_packing|cp|cp26)
@@ -205,8 +211,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=entropic_adaptive_beta \
     algorithm.use_kl_in_reward=False \
     \
-    data.train_files="$PWD/${DATA_FILE}" \
-    data.val_files="$PWD/${DATA_FILE}" \
+    data.train_files="${PWD}/${DATA_FILE}" \
+    data.val_files="${PWD}/${DATA_FILE}" \
     data.train_batch_size=${TRAIN_BATCH_SIZE} \
     data.max_prompt_length=${MAX_PROMPT_LENGTH} \
     data.max_response_length=${MAX_RESPONSE_LENGTH} \
@@ -252,7 +258,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     \
-    reward.custom_reward_function.path=ttt_discover/verl_integration/verl_reward.py \
+    reward.custom_reward_function.path=${PWD}/ttt_discover/verl_integration/verl_reward.py \
     reward.custom_reward_function.name=compute_score \
     \
     trainer.balance_batch=True \
