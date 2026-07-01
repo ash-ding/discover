@@ -150,7 +150,9 @@ NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
 ROLLOUT_N=${ROLLOUT_N:-64}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
-PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-64}
+# Set to total samples (train_batch_size * rollout_n) for single optimizer step
+# matching original TTT-Discover behavior (1 update per training iteration)
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-28672}
 LORA_RANK=${LORA_RANK:-32}
@@ -193,6 +195,9 @@ python3 -m verl.trainer.main_ppo \
     "actor_rollout_ref.actor.optim.betas=[0.9,0.95]" \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
+    actor_rollout_ref.actor.clip_ratio=1000.0 \
+    actor_rollout_ref.actor.clip_ratio_low=1000.0 \
+    actor_rollout_ref.actor.clip_ratio_high=1000.0 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.actor.use_kl_loss=False \

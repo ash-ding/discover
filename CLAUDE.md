@@ -8,6 +8,24 @@ TTT-Discover is a research implementation of test-time training for LLMs using r
 
 **Key Architecture Decision**: We use **VERL's colocated infrastructure** where vLLM inference and FSDP training alternate on the same GPUs. No manual vLLM server management needed.
 
+## Quick Start (New Machine)
+
+```bash
+git clone --recursive https://github.com/ash-ding/discover.git
+cd discover
+conda create -n verl_discover python=3.11 -y
+conda activate verl_discover
+pip install -r requirements/requirements-base.txt
+pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/
+MAX_JOBS=8 pip install flash-attn --no-build-isolation --no-cache-dir
+pip install -e verl
+```
+
+If you already cloned without `--recursive`, initialize the submodule with:
+```bash
+git submodule update --init --recursive
+```
+
 ## Critical Setup Requirements
 
 ### Hardware Requirements
