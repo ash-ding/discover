@@ -163,6 +163,27 @@ PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-32768}
 
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-${EXPERIMENT_TAG}_verl_$(date +%Y%m%d_%H%M)}
 
+# Resume from checkpoint:
+#   RESUME_FROM=checkpoints/ttt-discover/old_run bash run_verl.sh circle_packing
+# This loads weights from old_run but saves new results to EXPERIMENT_NAME.
+# To resume in-place (same dir), just set EXPERIMENT_NAME to the old run name.
+RESUME_FROM=${RESUME_FROM:-}
+if [ -n "$RESUME_FROM" ]; then
+    RESUME_MODE="resume_path"
+    RESUME_PATH="$RESUME_FROM"
+    # Copy PUCT state from source checkpoint if resuming cross-experiment
+    SOURCE_PUCT=$(find "$RESUME_FROM" -name "puct_sampler_step_*.json" | sort | tail -1)
+    if [ -n "$SOURCE_PUCT" ] && [ "$RESUME_FROM" != "checkpoints/ttt-discover/${EXPERIMENT_NAME}" ]; then
+        DEST_DIR="checkpoints/ttt-discover/${EXPERIMENT_NAME}"
+        mkdir -p "$DEST_DIR"
+        cp "$SOURCE_PUCT" "$DEST_DIR/puct_sampler.json"
+        echo "Copied PUCT state from $SOURCE_PUCT to $DEST_DIR/"
+    fi
+else
+    RESUME_MODE="auto"
+    RESUME_PATH=""
+fi
+
 export DISCOVER_MAX_MODEL_LEN=${DISCOVER_MAX_MODEL_LEN:-32768}
 export DISCOVER_LOG_DIR=${DISCOVER_LOG_DIR:-./tinker_log}
 export DISCOVER_PUCT_FILE_PATH=${DISCOVER_PUCT_FILE_PATH:-./checkpoints/ttt-discover/${EXPERIMENT_NAME}/puct_sampler.json}
@@ -236,4 +257,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=${TOTAL_EPOCHS} \
     trainer.rollout_data_dir=checkpoints/ttt-discover/${EXPERIMENT_NAME}/rollouts \
     trainer.val_before_train=False \
+    trainer.resume_mode=${RESUME_MODE} \
+    ${RESUME_PATH:+trainer.resume_from_path=${RESUME_PATH}} \
     "$@"
