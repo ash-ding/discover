@@ -35,12 +35,12 @@ git submodule update --init --recursive
 
 ### Cluster Nodes
 
-| Node | Hostname | IP | Role |
-|------|----------|-----|------|
-| Node 0 | ai-innovation-h100-10-preserve | 10.241.128.30 | Head (default) |
-| Node 1 | ai-innovation-h100-11-preserve | 10.241.128.16 | Worker (optional) |
+| Node | Hostname | Internal IP | External IP | Role |
+|------|----------|-------------|-------------|------|
+| Node 0 | ai-innovation-h100-10-preserve | 10.241.128.30 | 169.62.23.172 | Head (default) |
+| Node 1 | ai-innovation-h100-11-preserve | 10.241.128.16 | 169.62.18.122 | Worker (optional) |
 
-Override via `HEAD_NODE` and `WORKER_NODE` env vars. SSH must be passwordless between nodes.
+Scripts default to internal IPs (lower latency for Ray/NCCL). Override via `HEAD_NODE` and `WORKER_NODE` env vars. SSH must be passwordless between nodes.
 
 ### Environment Setup
 
