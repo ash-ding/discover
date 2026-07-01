@@ -24,10 +24,6 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
 
     Returns sum of radii if valid, 0.0 otherwise.
     """
-    code = _extract_last_code_block(solution_str)
-    if not code:
-        return 0.0
-
     extra = extra_info or {}
     env_module = extra.get("env_module", "examples.circle_packing.env")
     env_class = extra.get("env_class", "CirclePackingEnv")
@@ -47,8 +43,9 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
             eval_timeout=eval_timeout,
             num_cpus_per_task=num_cpus,
         )
-        result = evaluator.get_reward(code)
+        # Pass full response text — evaluator extracts code internally
+        result = evaluator.get_reward(solution_str, state=extra.get("state"))
         return float(result.get("reward", 0.0))
     except Exception as e:
-        logger.debug(f"Reward eval failed: {e}")
+        logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
         return 0.0

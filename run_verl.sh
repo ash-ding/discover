@@ -155,9 +155,11 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-28672}
 LORA_RANK=${LORA_RANK:-32}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
-ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.85}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
 SP_SIZE=${SP_SIZE:-1}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-32768}
+
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-${EXPERIMENT_TAG}_verl_$(date +%Y%m%d_%H%M)}
 
 export DISCOVER_MAX_MODEL_LEN=${DISCOVER_MAX_MODEL_LEN:-32768}
 export DISCOVER_LOG_DIR=${DISCOVER_LOG_DIR:-./tinker_log}
@@ -165,8 +167,6 @@ export DISCOVER_PUCT_FILE_PATH=${DISCOVER_PUCT_FILE_PATH:-./checkpoints/ttt-disc
 export DISCOVER_PUCT_C=${DISCOVER_PUCT_C:-1.0}
 export DISCOVER_TOPK_CHILDREN=${DISCOVER_TOPK_CHILDREN:-2}
 export DISCOVER_MAX_BUFFER_SIZE=${DISCOVER_MAX_BUFFER_SIZE:-1000}
-
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-${EXPERIMENT_TAG}_verl_$(date +%Y%m%d_%H%M)}
 
 ########################### Launch ###########################
 python3 -m verl.trainer.main_ppo \
@@ -187,6 +187,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.lora_rank=${LORA_RANK} \
     actor_rollout_ref.model.lora_alpha=${LORA_RANK} \
     actor_rollout_ref.model.target_modules=all-linear \
+    "++actor_rollout_ref.model.lora.merge=True" \
     \
     actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
     "actor_rollout_ref.actor.optim.betas=[0.9,0.95]" \
@@ -207,6 +208,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.rollout.free_cache_engine=True \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
     actor_rollout_ref.rollout.enforce_eager=True \
     "+actor_rollout_ref.rollout.agent.agent_loop_manager_class=ttt_discover.verl_integration.agent_loop.DiscoverAgentLoopManagerTQ" \
     \
@@ -224,7 +226,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
     trainer.nnodes=1 \
-    trainer.save_freq=2 \
+    trainer.save_freq=${SAVE_FREQ:-0} \
     trainer.test_freq=-1 \
     trainer.total_epochs=${TOTAL_EPOCHS} \
     trainer.rollout_data_dir=checkpoints/ttt-discover/${EXPERIMENT_NAME}/rollouts \

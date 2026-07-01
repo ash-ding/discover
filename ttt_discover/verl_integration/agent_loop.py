@@ -244,7 +244,16 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     )
                 )
                 tasks.append(task)
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Check for errors in generation
+            valid_results = []
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    logger.error(f"Session {i} failed: {type(r).__name__}: {r}")
+                else:
+                    valid_results.append(r)
+            logger.info(f"Generation complete: {len(valid_results)}/{len(results)} succeeded")
 
             # Batch PUCT update: collect all results for this prompt group
             if not validate and self._puct_actor is not None:
@@ -253,7 +262,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 successful_parents = []
                 failed_parents = []
 
-                for output, code, score in results:
+                for output, code, score in valid_results:
                     if score > 0 and code:
                         from ttt_discover.tinker_utils.state import State
                         new_state = State(
@@ -411,6 +420,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     "log_dir": self._discover_config.get("log_dir", "./tinker_log"),
                     "eval_timeout": self._discover_config.get("eval_timeout", 530),
                     "num_cpus_per_task": self._discover_config.get("num_cpus_per_task", 1),
+                    "state": prompt.get("_puct_state"),
                 }
                 from ttt_discover.verl_integration.verl_reward import compute_score
                 score = compute_score(
@@ -420,7 +430,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     extra_info=extra_info,
                 )
             except Exception as e:
-                logger.debug(f"Reward eval failed: {e}")
+                logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
                 score = 0.0
 
         output.reward_score = score
