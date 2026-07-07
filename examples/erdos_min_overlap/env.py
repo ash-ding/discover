@@ -172,8 +172,8 @@ Smaller sequences with less than 1k samples are preferred - they are faster to o
 **Lower C₅ values are better** - they provide tighter upper bounds on the Erdős constant.
 
 ## Budget & Resources
-- **Time budget**: 1000s for your code to run
-- **CPUs**: 2 available
+- **Time budget**: {self.eval_timeout}s for your code to run
+- **CPUs**: {self.num_cpus_per_task} available
 
 ## Rules
 - Define `run(seed=42, budget_s=1000, **kwargs)` that returns `(h_values, c5_bound, n_points)`

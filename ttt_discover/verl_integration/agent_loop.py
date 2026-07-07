@@ -12,6 +12,7 @@ Activate via config:
 """
 
 import asyncio
+import glob
 import importlib
 import logging
 import os
@@ -406,7 +407,8 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             },
         )
 
-        # Compute reward
+        # Compute reward (run in thread to avoid blocking the async event loop —
+        # the evaluator calls ray.get() internally which would serialize all evals)
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
         code = self._extract_last_code_block(response_text)
         score = 0.0
@@ -423,7 +425,8 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     "state": prompt.get("_puct_state"),
                 }
                 from ttt_discover.verl_integration.verl_reward import compute_score
-                score = compute_score(
+                score = await asyncio.to_thread(
+                    compute_score,
                     data_source=self._discover_config.get("data_source", "circle_packing"),
                     solution_str=response_text,
                     ground_truth=None,
@@ -538,6 +541,7 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "max_buffer_size": int(os.environ.get("DISCOVER_MAX_BUFFER_SIZE", "1000")),
         }
 
+        resume_step = self._detect_puct_resume_step()
         self._puct_actor = PUCTSamplerActor.remote(
             file_path=self._discover_config["puct_file_path"],
             env_module=self._discover_config["env_module"],
@@ -547,9 +551,31 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             batch_size=self.config.data.train_batch_size,
             puct_c=self._discover_config["puct_c"],
             topk_children=self._discover_config["topk_children"],
+            resume_step=resume_step,
         )
 
-        self._global_steps = 0
+        self._global_steps = resume_step or 0
+
+    def _detect_puct_resume_step(self) -> int | None:
+        """Find the latest PUCT sampler step file to resume from."""
+        base_path = self._discover_config["puct_file_path"]
+        base_name = base_path.replace(".json", "")
+        pattern = f"{base_name}_step_*.json"
+        files = glob.glob(pattern)
+        if not files:
+            return None
+        steps = []
+        for f in files:
+            try:
+                step_str = f.rsplit("_step_", 1)[1].replace(".json", "")
+                steps.append(int(step_str))
+            except (IndexError, ValueError):
+                continue
+        if not steps:
+            return None
+        latest = max(steps)
+        logger.info(f"Detected PUCT state at step {latest}, will resume from it")
+        return latest
 
     @classmethod
     @auto_await

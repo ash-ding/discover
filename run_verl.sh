@@ -185,13 +185,13 @@ if [ -n "$RESUME_DIR" ]; then
         # Use the resume dir's name as experiment name → results stay in same dir
         EXPERIMENT_NAME=$(basename "$RESUME_DIR")
     else
-        # Copy PUCT state from source to new experiment dir
+        # Copy PUCT state from source to new experiment dir (preserve step-indexed filename)
         SOURCE_PUCT=$(find "$RESUME_DIR" -name "puct_sampler_step_*.json" | sort | tail -1)
         if [ -n "$SOURCE_PUCT" ]; then
             DEST_DIR="checkpoints/ttt-discover/${EXPERIMENT_NAME}"
             mkdir -p "$DEST_DIR"
-            cp "$SOURCE_PUCT" "$DEST_DIR/puct_sampler.json"
-            echo "Copied PUCT state from $SOURCE_PUCT to $DEST_DIR/"
+            cp "$SOURCE_PUCT" "$DEST_DIR/$(basename "$SOURCE_PUCT")"
+            echo "Copied PUCT state from $SOURCE_PUCT to $DEST_DIR/$(basename "$SOURCE_PUCT")"
         fi
     fi
 else

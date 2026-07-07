@@ -50,22 +50,30 @@ def load_sharded_state_dict(actor_dir: str) -> dict:
         shards.append(shard)
         print(f"  Loaded rank {rank}: {len(shard)} keys")
 
+    def _to_local(t):
+        """Convert DTensor/ShardedTensor to plain torch.Tensor."""
+        if hasattr(t, '_local_tensor'):
+            return t._local_tensor
+        if hasattr(t, 'local_tensor'):
+            return t.local_tensor()
+        if hasattr(t, 'local_shards'):
+            shards = t.local_shards()
+            if shards:
+                return shards[0].tensor
+        return t
+
     # Merge shards into full state dict
-    # FSDP sharded state dict: each key appears in all ranks with a shard of the full tensor
     full_state = {}
     all_keys = set()
     for shard in shards:
         all_keys.update(shard.keys())
 
     for key in sorted(all_keys):
-        tensors = [s[key] for s in shards if key in s]
+        tensors = [_to_local(s[key]) for s in shards if key in s]
         if len(tensors) == 1:
             full_state[key] = tensors[0]
         elif len(tensors) == world_size:
-            # Concatenate shards along the sharded dimension
-            # FSDP typically shards along dim 0 (flatten + shard)
             if tensors[0].dim() == 0:
-                # Scalar — should be identical across ranks
                 full_state[key] = tensors[0]
             else:
                 full_state[key] = torch.cat(tensors, dim=0)

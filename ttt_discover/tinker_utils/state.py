@@ -100,7 +100,7 @@ class State(ABC):
         elif self.value is not None:
             after_value = self.value if maximize else -self.value
             current_gap = target - after_value if maximize else after_value - target
-            value_ctx += f"\nCurrent {metric_name} (higher is better): {after_value:.6f}"
+            value_ctx += f"\nCurrent {metric_name} ({improvement_direction} is better): {after_value:.6f}"
             value_ctx += f"\nTarget: {target}. Current gap: {current_gap:.6f}. Further improvements will also be generously rewarded."
         else:
             value_ctx += f"\nTarget {metric_name}: {target}"

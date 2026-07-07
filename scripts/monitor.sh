@@ -36,11 +36,11 @@ echo ""
 echo "--- Completed Steps ---"
 STEPS=$(run_cmd "grep 'step:' ${LOG_FILE} 2>/dev/null" | while IFS= read -r line; do
     step=$(echo "$line" | grep -oP 'step:\K\d+' | head -1)
-    score_mean=$(echo "$line" | grep -oP 'critic/score/mean:\K[\d.]+')
-    score_max=$(echo "$line" | grep -oP 'critic/score/max:\K[\d.]+')
+    score_mean=$(echo "$line" | grep -oP 'critic/score/mean:\K[\d.eE+-]+')
+    score_max=$(echo "$line" | grep -oP 'critic/score/max:\K[\d.eE+-]+')
     time=$(echo "$line" | grep -oP 'timing_s/step:\K[\d.]+')
     loss=$(echo "$line" | grep -oP 'actor/pg_loss:np\.float64.\K[^)]+')
-    printf "step=%2s | %6.0fs | mean=%.4f | max=%.4f | loss=%s\n" \
+    printf "step=%2s | %6.0fs | mean=%.6f | max=%.6f | loss=%s\n" \
         "$step" "$time" "$score_mean" "$score_max" "$loss"
 done)
 
