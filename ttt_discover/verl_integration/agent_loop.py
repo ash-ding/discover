@@ -229,9 +229,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             decoded_end = self._tokenizer.decode(prompt_ids[-20:])
             logger.info(f"Prompt ends with: {repr(decoded_end)}")
 
-            # Collect all outputs for batch PUCT update
-            outputs_and_scores = []
-
+            # Generate + eval per session (continuous batching via Ray)
             tasks = []
             for session_id in range(n):
                 task = asyncio.create_task(
@@ -247,16 +245,28 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 tasks.append(task)
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Check for errors in generation
+            # Check for errors
             valid_results = []
             for i, r in enumerate(results):
                 if isinstance(r, Exception):
                     logger.error(f"Session {i} failed: {type(r).__name__}: {r}")
                 else:
                     valid_results.append(r)
-            logger.info(f"Generation complete: {len(valid_results)}/{len(results)} succeeded")
+            # Per-group summary
+            scores = [s for _, _, s in valid_results]
+            nonzero_scores = [s for s in scores if s > 0]
+            gen_times = [o.metrics.generate_sequences for o, _, _ in valid_results if hasattr(o.metrics, 'generate_sequences')]
+            group_index = prompt.get("_group_index", 0)
+            global_steps = prompt.get("global_steps", 0)
+            logger.info(
+                f"[Step {global_steps} Group {group_index}] "
+                f"success={len(nonzero_scores)}/{len(results)} "
+                f"score_max={max(scores):.6f} "
+                f"score_mean={sum(nonzero_scores)/len(nonzero_scores):.4f if nonzero_scores else 0:.4f} "
+                f"avg_time={sum(gen_times)/len(gen_times):.1f}s"
+            )
 
-            # Batch PUCT update: collect all results for this prompt group
+            # Batch PUCT update
             if not validate and self._puct_actor is not None:
                 global_steps = prompt.get("global_steps", 0)
                 successful_states = []
@@ -301,7 +311,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         validate: bool,
         session_id: int,
     ) -> tuple[AgentLoopOutput, str, float]:
-        """Two-phase generation: thinking + forced answer.
+        """Two-phase generation: thinking + forced answer + eval.
 
         Returns (output, extracted_code, reward_score).
         """
@@ -314,13 +324,19 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             logger.warning(f"Prompt too long ({prompt_len}), using minimal budget")
             phase1_budget = 100
 
+        # Compute deterministic per-rollout seed for reproducibility
+        global_steps = prompt.get("global_steps", 0)
+        group_index = prompt.get("_group_index", 0)
+        base_seed = 42
+        per_rollout_seed = base_seed + global_steps * 10000 + group_index * 100 + session_id
+
         # Phase 1: thinking (with stop sequences)
-        logger.info(f"_generate_two_phase: session={session_id}, prompt_len={prompt_len}, phase1_budget={phase1_budget}")
-        request_id = uuid.uuid4().hex
+        logger.info(f"_generate_two_phase: session={session_id}, prompt_len={prompt_len}, phase1_budget={phase1_budget}, seed={per_rollout_seed}, group={group_index}, step={global_steps}")
+        request_id = f"s{global_steps}_g{group_index}_r{session_id}_p1"
         phase1_output = await self.llm_client.generate(
             request_id=request_id,
             prompt_ids=prompt_ids,
-            sampling_params={**sampling_params, "max_tokens": phase1_budget},
+            sampling_params={**sampling_params, "max_tokens": phase1_budget, "seed": per_rollout_seed},
         )
 
         p1_tokens = phase1_output.token_ids
@@ -351,11 +367,11 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     response_logprobs = p1_logprobs
                     response_mask = [1] * len(p1_tokens)
                 else:
-                    request_id_p2 = uuid.uuid4().hex
+                    request_id_p2 = f"s{global_steps}_g{group_index}_r{session_id}_p2a"
                     phase2_output = await self.llm_client.generate(
                         request_id=request_id_p2,
                         prompt_ids=phase2_prompt,
-                        sampling_params={**sampling_params, "max_tokens": phase2_budget},
+                        sampling_params={**sampling_params, "max_tokens": phase2_budget, "seed": per_rollout_seed + 50000},
                     )
                     p2_tokens = phase2_output.token_ids
                     p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
@@ -371,11 +387,11 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     response_logprobs = p1_logprobs + [0.0] * len(self._phase2_prefill_ids)
                     response_mask = [1] * len(p1_tokens) + [0] * len(self._phase2_prefill_ids)
                 else:
-                    request_id_p2 = uuid.uuid4().hex
+                    request_id_p2 = f"s{global_steps}_g{group_index}_r{session_id}_p2b"
                     phase2_output = await self.llm_client.generate(
                         request_id=request_id_p2,
                         prompt_ids=phase2_prompt,
-                        sampling_params={**sampling_params, "max_tokens": phase2_budget},
+                        sampling_params={**sampling_params, "max_tokens": phase2_budget, "seed": per_rollout_seed + 50000},
                     )
                     p2_tokens = phase2_output.token_ids
                     p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
@@ -407,8 +423,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             },
         )
 
-        # Compute reward (run in thread to avoid blocking the async event loop —
-        # the evaluator calls ray.get() internally which would serialize all evals)
+        # Compute reward (run in thread to avoid blocking the async event loop)
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
         code = self._extract_last_code_block(response_text)
         score = 0.0
@@ -437,7 +452,21 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 score = 0.0
 
         output.reward_score = score
-        output.extra_fields["reward_extra_info"] = {"acc": float(score > 0)}
+
+        # Compute phase token counts
+        phase1_tokens = len(p1_tokens)
+        phase2_tokens = len(response_ids) - phase1_tokens if needs_phase2 else 0
+
+        output.extra_fields["reward_extra_info"] = {
+            "acc": float(score > 0),
+            "seed": per_rollout_seed,
+            "group_index": group_index,
+            "session_id": session_id,
+            "gen_time": round(gen_time, 2),
+            "phase1_tokens": phase1_tokens,
+            "phase2_tokens": phase2_tokens,
+            "total_tokens": len(response_ids),
+        }
 
         # Write to TransferQueue
         await self._write_to_tq(output, prompt, session_id, validate)
@@ -610,6 +639,10 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
         if "_puct_state" not in prompts.keys():
             state_data = NonTensorStack(*[NonTensorData(s) for s in states])
             prompts["_puct_state"] = state_data
+
+        # Assign deterministic group indices for per-rollout seed computation
+        group_indices = NonTensorStack(*[NonTensorData(i) for i in range(batch_size)])
+        prompts["_group_index"] = group_indices
 
         chunks = prompts.chunk(len(self.agent_loop_workers))
         ray.get([
