@@ -327,66 +327,64 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             phase1_output.stop_reason == "stop"
             or self._hit_stop_token(p1_tokens)
         )
-        needs_phase2 = (
-            not hit_stop
-            and len(p1_tokens) >= phase1_budget
-            and not self._contains_pattern(p1_tokens, "</think>")
-        )
+        budget_exhausted = (not hit_stop and len(p1_tokens) >= phase1_budget)
 
-        if not needs_phase2:
+        if not budget_exhausted:
+            # Case A: model stopped naturally — thinking + answer complete
             response_ids = p1_tokens
             response_logprobs = p1_logprobs
             response_mask = [1] * len(p1_tokens)
-        else:
-            # Check if model already produced </think> — continue without prefill
-            if self._contains_pattern(p1_tokens, "</think>"):
-                phase2_prompt = prompt_ids + p1_tokens
-                phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
-                if phase2_budget <= 0:
-                    response_ids = p1_tokens
-                    response_logprobs = p1_logprobs
-                    response_mask = [1] * len(p1_tokens)
-                else:
-                    request_id_p2 = uuid.uuid4().hex
-                    phase2_output = await self.llm_client.generate(
-                        request_id=request_id_p2,
-                        prompt_ids=phase2_prompt,
-                        sampling_params={**sampling_params, "max_tokens": phase2_budget},
-                    )
-                    p2_tokens = phase2_output.token_ids
-                    p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
-                    response_ids = p1_tokens + p2_tokens
-                    response_logprobs = p1_logprobs + p2_logprobs
-                    response_mask = [1] * len(p1_tokens) + [1] * len(p2_tokens)
+        elif self._contains_pattern(p1_tokens, "</think>"):
+            # Case B: budget exhausted but </think> present — thinking done,
+            # answer truncated. Continue generating without prefill.
+            phase2_prompt = prompt_ids + p1_tokens
+            phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
+            if phase2_budget <= 0:
+                response_ids = p1_tokens
+                response_logprobs = p1_logprobs
+                response_mask = [1] * len(p1_tokens)
             else:
-                # Inject </think> prefill
-                phase2_prompt = prompt_ids + p1_tokens + self._phase2_prefill_ids
-                phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
-                if phase2_budget <= 0:
-                    response_ids = p1_tokens + self._phase2_prefill_ids
-                    response_logprobs = p1_logprobs + [0.0] * len(self._phase2_prefill_ids)
-                    response_mask = [1] * len(p1_tokens) + [0] * len(self._phase2_prefill_ids)
-                else:
-                    request_id_p2 = uuid.uuid4().hex
-                    phase2_output = await self.llm_client.generate(
-                        request_id=request_id_p2,
-                        prompt_ids=phase2_prompt,
-                        sampling_params={**sampling_params, "max_tokens": phase2_budget},
-                    )
-                    p2_tokens = phase2_output.token_ids
-                    p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
+                request_id_p2 = uuid.uuid4().hex
+                phase2_output = await self.llm_client.generate(
+                    request_id=request_id_p2,
+                    prompt_ids=phase2_prompt,
+                    sampling_params={**sampling_params, "max_tokens": phase2_budget},
+                )
+                p2_tokens = phase2_output.token_ids
+                p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
+                response_ids = p1_tokens + p2_tokens
+                response_logprobs = p1_logprobs + p2_logprobs
+                response_mask = [1] * len(p1_tokens) + [1] * len(p2_tokens)
+        else:
+            # Case C: budget exhausted, no </think> — thinking truncated.
+            # Inject prefill to force end of thinking and start answer.
+            phase2_prompt = prompt_ids + p1_tokens + self._phase2_prefill_ids
+            phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
+            if phase2_budget <= 0:
+                response_ids = p1_tokens + self._phase2_prefill_ids
+                response_logprobs = p1_logprobs + [0.0] * len(self._phase2_prefill_ids)
+                response_mask = [1] * len(p1_tokens) + [0] * len(self._phase2_prefill_ids)
+            else:
+                request_id_p2 = uuid.uuid4().hex
+                phase2_output = await self.llm_client.generate(
+                    request_id=request_id_p2,
+                    prompt_ids=phase2_prompt,
+                    sampling_params={**sampling_params, "max_tokens": phase2_budget},
+                )
+                p2_tokens = phase2_output.token_ids
+                p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
 
-                    response_ids = p1_tokens + self._phase2_prefill_ids + p2_tokens
-                    response_logprobs = (
-                        p1_logprobs
-                        + [0.0] * len(self._phase2_prefill_ids)
-                        + p2_logprobs
-                    )
-                    response_mask = (
-                        [1] * len(p1_tokens)
-                        + [0] * len(self._phase2_prefill_ids)
-                        + [1] * len(p2_tokens)
-                    )
+                response_ids = p1_tokens + self._phase2_prefill_ids + p2_tokens
+                response_logprobs = (
+                    p1_logprobs
+                    + [0.0] * len(self._phase2_prefill_ids)
+                    + p2_logprobs
+                )
+                response_mask = (
+                    [1] * len(p1_tokens)
+                    + [0] * len(self._phase2_prefill_ids)
+                    + [1] * len(p2_tokens)
+                )
 
         gen_time = time.time() - t0
 
