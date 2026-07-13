@@ -14,6 +14,12 @@ from examples.gpu_mode.prompt import (
 )
 
 
+SCORE_SCALE = {
+    "trimul": 1500,
+    "mla_decode_nvidia": 5000,
+}
+
+
 def get_gpu_mode_error(msg: str) -> dict:
     return {
         "reward": 0.0,
@@ -31,40 +37,33 @@ class GpuModeRewardEvaluator(BaseRewardEvaluator):
         self.problem_type = kwargs.get("problem_type")
         self.log_dir = kwargs.get("log_dir")
 
-        # Only local evaluation supported
-        self.eval_mode = "local"
-
-        if self.problem_type == "trimul":
-            self.score_scale = 1500
-            self.task_name = "trimul"
-        elif self.problem_type == "mla_decode_nvidia":
-            self.score_scale = 5000
-            self.task_name = "mla_decode_nvidia"
-        else:
+        if self.problem_type not in SCORE_SCALE:
             raise ValueError(f"Unknown problem_type: {self.problem_type}")
+        self.score_scale = SCORE_SCALE[self.problem_type]
+        self.task_name = self.problem_type
 
-        # Initialize local evaluator
-        # Priority: 1) kwargs from config, 2) environment variable, 3) default
         gpu_id = kwargs.get("kernel_eval_gpu") or int(os.getenv("KERNEL_EVAL_GPU", "5"))
         timeout = kwargs.get("kernel_eval_timeout") or int(os.getenv("KERNEL_EVAL_TIMEOUT", "1200"))
         max_retries = kwargs.get("kernel_eval_retries") or int(os.getenv("KERNEL_EVAL_RETRIES", "2"))
 
-        # For container isolation, check both old and new parameter names
-        # Priority: kernel_eval_use_container > kernel_eval_use_docker > env vars > default
         use_container_config = kwargs.get("kernel_eval_use_container")
-        use_docker_config = kwargs.get("kernel_eval_use_docker")  # Backward compatibility
+        use_docker_config = kwargs.get("kernel_eval_use_docker")
 
         if use_container_config is not None:
             use_container = use_container_config
         elif use_docker_config is not None:
-            use_container = use_docker_config  # Use old parameter
+            use_container = use_docker_config
         else:
-            # Check environment variables (new > old)
             use_container_env = os.getenv("KERNEL_EVAL_USE_CONTAINER")
             if use_container_env:
                 use_container = use_container_env.lower() == "true"
             else:
                 use_container = os.getenv("KERNEL_EVAL_USE_DOCKER", "true").lower() == "true"
+
+        self.gpu_id = gpu_id
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.use_container = use_container
 
         self.local_evaluator = LocalKernelEvaluator(
             gpu_id=gpu_id,
@@ -72,18 +71,37 @@ class GpuModeRewardEvaluator(BaseRewardEvaluator):
             max_retries=max_retries,
             use_container=use_container,
         )
-        print(f"✓ Local evaluator initialized (GPU {gpu_id}, container={'enabled' if use_container else 'disabled'})")
 
     def get_reward(self, code: str, state: State) -> dict:
-        # Prevent no triton kernel code
         if "@triton.jit" not in code:
             return get_gpu_mode_error("Code must contain @triton.jit.")
-        # Prevent identity kernel for trimul
         if self.problem_type == "trimul" and "identity" in code:
             return get_gpu_mode_error("Identity kernel is not allowed.")
 
-        # Only local evaluation supported
         return self._evaluate_local(code)
+
+    def _result_to_reward(self, result: dict) -> dict:
+        """Convert evaluator result dict to reward dict."""
+        if not result["success"]:
+            return {
+                "reward": 0.0,
+                "msg": f"Evaluation failed: {result['error']}",
+                "correctness": 0.0,
+                "raw_score": result["score_us"],
+                "result_construction": [],
+                "stdout": result.get("stdout", ""),
+            }
+
+        score_us = result["score_us"]
+        reward = self.score_scale / score_us
+        return {
+            "reward": float(reward),
+            "msg": f"Success! Runtime: {score_us:.2f} us",
+            "correctness": 1.0,
+            "raw_score": float(score_us),
+            "result_construction": [],
+            "stdout": result.get("stdout", ""),
+        }
 
     def _evaluate_local(self, code: str) -> dict:
         """Evaluate using local GPU (never raises exception)."""
@@ -91,47 +109,15 @@ class GpuModeRewardEvaluator(BaseRewardEvaluator):
             result = self.local_evaluator.evaluate(
                 submission_code=code,
                 task_name=self.task_name,
-                gpu_type="H100"  # Local evaluation uses H100
+                gpu_type="H100",
             )
-
-            if not result["success"]:
-                # Evaluation failed - return penalty
-                return {
-                    "reward": 0.0,
-                    "msg": f"Local evaluation failed: {result['error']}",
-                    "correctness": 0.0,
-                    "raw_score": result["score_us"],
-                    "result_construction": [],
-                    "stdout": result.get("stdout", ""),
-                }
-
-            # Success
-            score_us = result["score_us"]
-            reward = self.score_scale / score_us
-
-            return {
-                "reward": float(reward),
-                "msg": f"Success! Runtime: {score_us:.2f} μs (local evaluation)",
-                "correctness": 1.0,
-                "raw_score": float(score_us),
-                "result_construction": [],
-                "stdout": result.get("stdout", ""),
-            }
+            return self._result_to_reward(result)
 
         except Exception as e:
-            # Even if evaluator crashes, never raise exception
             import traceback
-            print(f"✗ Fatal local evaluation error: {e}")
+            print(f"Fatal local evaluation error: {e}")
             traceback.print_exc()
-
-            return {
-                "reward": 0.0,
-                "msg": f"Fatal local evaluation error: {str(e)}",
-                "correctness": 0.0,
-                "raw_score": -1_000_000,
-                "result_construction": [],
-                "stdout": "",
-            }
+            return get_gpu_mode_error(f"Local evaluation error: {e}")
 
 
 

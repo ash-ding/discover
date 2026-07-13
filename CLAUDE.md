@@ -401,10 +401,16 @@ The VERL integration is **task-agnostic**. Custom AgentLoop reads task config fr
 
 ## WandB Configuration
 
-Set in `~/.bashrc`:
+**推荐配置（添加到 `~/.bashrc`）：**
+
+```bash
+# WandB offline mode (避免 API key 错误)
+export WANDB_MODE=offline
+```
+
+如果需要云端同步，改用：
 ```bash
 export WANDB_API_KEY="..."
 export WANDB_ENTITY="..."
+export WANDB_MODE=online  # 或者不设置，默认 online
 ```
-
-Or use `WANDB_MODE=offline` to log locally without syncing.

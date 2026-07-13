@@ -164,7 +164,7 @@ class LocalKernelEvaluator:
                 ["nvidia-smi", "-i", str(self.gpu_id), "--query-gpu=name", "--format=csv,noheader"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=30
             )
             if result.returncode != 0:
                 raise RuntimeError(f"GPU {self.gpu_id} not available")
@@ -275,13 +275,21 @@ class LocalKernelEvaluator:
             submission_file = tmpdir / "submission.py"
             submission_file.write_text(submission_code)
 
-            # Write config
-            config = {
-                "submission_file": str(submission_file),
-                "task_name": task_name,
-                "gpu_type": gpu_type,
-                "result_file": str(tmpdir / "result.json")
-            }
+            # Write config (use container-relative paths for container mode)
+            if self.container_runtime in ["podman", "docker"]:
+                config = {
+                    "submission_file": "/workspace/data/submission.py",
+                    "task_name": task_name,
+                    "gpu_type": gpu_type,
+                    "result_file": "/workspace/data/result.json"
+                }
+            else:
+                config = {
+                    "submission_file": str(submission_file),
+                    "task_name": task_name,
+                    "gpu_type": gpu_type,
+                    "result_file": str(tmpdir / "result.json")
+                }
             config_file = tmpdir / "config.json"
             config_file.write_text(json.dumps(config, indent=2))
 
@@ -321,13 +329,14 @@ class LocalKernelEvaluator:
         # Get absolute path to lib directory (contains task definitions)
         lib_dir = Path(__file__).parent.parent / "lib"
 
-        # Build container command (most args are identical)
+        # Build container command
+        # Note: --cpus and --memory omitted because cgroup cpu controller
+        # is unavailable on the eval nodes (rootless podman limitation)
         container_cmd = [
             self.container_runtime, "run",
             "--rm",  # Remove container after run
             "--network", "none",  # No network access (security)
-            "--memory", "32g",  # Memory limit
-            "--cpus", "4",  # CPU limit
+            "-e", f"EVAL_TIMEOUT={self.timeout}",  # Pass timeout to worker
             "-v", f"{tmpdir}:/workspace/data",  # Mount temp dir
             "-v", f"{lib_dir}:/workspace/lib:ro",  # Mount lib dir (read-only)
         ]
@@ -342,10 +351,10 @@ class LocalKernelEvaluator:
                 "--gpus", f"device={self.gpu_id}"  # Docker syntax
             ])
 
-        # Add image and command
+        # Add image and config path (ENTRYPOINT already runs eval_worker.py)
         container_cmd.extend([
             self.container_image,
-            "python", "/workspace/eval_worker.py", "/workspace/data/config.json"
+            "/workspace/data/config.json"
         ])
 
         logger.debug(f"Running {self.container_runtime}: {' '.join(container_cmd)}")
@@ -374,35 +383,63 @@ class LocalKernelEvaluator:
         """Run worker in subprocess (fallback when Docker unavailable)."""
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+        env["EVAL_TIMEOUT"] = str(self.timeout)
 
-        # Use conda environment if available
-        conda_env = os.getenv("CONDA_DEFAULT_ENV", "")
-        if conda_env and "discover_gpumode" in conda_env:
-            # Already in correct environment, use current python
-            cmd = [sys.executable, str(self.worker_script), str(config_file)]
-        elif os.path.exists(os.path.expanduser("~/.conda/envs/discover_gpumode/bin/python")):
-            # Use discover_gpumode conda python
-            conda_python = os.path.expanduser("~/.conda/envs/discover_gpumode/bin/python")
-            cmd = [conda_python, str(self.worker_script), str(config_file)]
+        # Fix CUDA multiprocessing issues
+        # eval.py uses multiprocessing.pool which forks processes
+        # CUDA context cannot be shared across fork, so we disable CUDA in parent
+        # This forces each child process to initialize CUDA fresh
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+        # Critical: Unset any CUDA env vars that might cause issues in multiprocessing
+        # The child processes will re-initialize CUDA with CUDA_VISIBLE_DEVICES
+        # Remove these to prevent "already initialized" errors
+        for key in list(env.keys()):
+            if key.startswith("CUDA_") and key != "CUDA_VISIBLE_DEVICES":
+                del env[key]
+
+        # Ensure conda python is used for all subprocess calls
+        conda_bin = str(Path(sys.executable).parent)
+        conda_base = str(Path(sys.executable).parent.parent)
+
+        # Prepend conda bin to PATH (so 'python3' resolves to conda python)
+        env["PATH"] = conda_bin + os.pathsep + env.get("PATH", "")
+
+        # Set PYTHONPATH to include conda site-packages
+        # This ensures child processes (python3 eval.py) can find torch, etc.
+        python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        site_packages = str(Path(conda_base) / "lib" / python_version / "site-packages")
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        if existing_pythonpath:
+            env["PYTHONPATH"] = site_packages + os.pathsep + existing_pythonpath
         else:
-            # Fallback to system python
-            cmd = [sys.executable, str(self.worker_script), str(config_file)]
+            env["PYTHONPATH"] = site_packages
+
+        cmd = [sys.executable, str(self.worker_script), str(config_file)]
 
         logger.debug(f"Running subprocess: {' '.join(cmd)}")
+        logger.debug(f"PATH: {env['PATH'][:200]}...")
+        logger.debug(f"PYTHONPATH: {env.get('PYTHONPATH', 'Not set')[:200]}...")
 
         try:
             proc = subprocess.Popen(
                 cmd,
                 env=env,
+                cwd=str(tmpdir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                start_new_session=True,
             )
             stdout, stderr = proc.communicate(timeout=self.timeout)
             return stdout, stderr, proc.returncode
 
         except subprocess.TimeoutExpired:
-            proc.kill()
+            import signal
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             proc.wait()
             raise
 
@@ -456,7 +493,7 @@ class LocalKernelEvaluator:
             result = subprocess.run(
                 ["nvidia-smi", "-i", str(self.gpu_id)],
                 capture_output=True,
-                timeout=5
+                timeout=30
             )
             if result.returncode == 0:
                 logger.info(f"✓ GPU {self.gpu_id} recovered")

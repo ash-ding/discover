@@ -14,6 +14,7 @@ Activate via config:
 import asyncio
 import glob
 import importlib
+import json
 import logging
 import os
 import re
@@ -405,6 +406,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
         code = self._extract_last_code_block(response_text)
         score = 0.0
+        eval_error = ""
 
         if code and not validate:
             try:
@@ -417,20 +419,64 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     "num_cpus_per_task": self._discover_config.get("num_cpus_per_task", 1),
                     "state": prompt.get("_puct_state"),
                 }
-                from ttt_discover.verl_integration.verl_reward import compute_score
-                score = await asyncio.to_thread(
-                    compute_score,
-                    data_source=self._discover_config.get("data_source", "circle_packing"),
-                    solution_str=response_text,
-                    ground_truth=None,
-                    extra_info=extra_info,
-                )
+                eval_server = self._discover_config.get("gpu_eval_server", "")
+                has_triton = "@triton.jit" in code
+
+                logger.debug(f"Eval dispatch: eval_server='{eval_server}', has_triton={has_triton}, code_len={len(code)}")
+
+                if eval_server and has_triton:
+                    import urllib.request
+                    task_name = self._discover_config.get("problem_type", "trimul")
+                    eval_timeout = self._discover_config.get("eval_timeout", 530) + 60
+                    score_scale = self._discover_config.get("score_scale", 1500)
+                    payload = json.dumps({"code": code, "task_name": task_name, "gpu_type": "H100"}).encode()
+                    max_retries = 2
+                    for attempt in range(1 + max_retries):
+                        try:
+                            req = urllib.request.Request(f"http://{eval_server}/", data=payload,
+                                                         headers={"Content-Type": "application/json"})
+                            logger.debug(f"HTTP POST to http://{eval_server}/, payload_size={len(payload)}, timeout={eval_timeout}, attempt={attempt}")
+                            result = await asyncio.to_thread(
+                                lambda: json.loads(urllib.request.urlopen(req, timeout=eval_timeout).read())
+                            )
+                            if result.get("success"):
+                                score = float(score_scale / result["score_us"])
+                            else:
+                                eval_error = str(result.get("error", ""))[:500]
+                            logger.debug(f"HTTP result: success={result.get('success')}, score_us={result.get('score_us')}, final_score={score}")
+                            break
+                        except Exception as e:
+                            logger.warning(f"HTTP eval attempt {attempt} failed: {e}")
+                            if attempt < max_retries:
+                                await asyncio.sleep(5 * (attempt + 1))
+                            else:
+                                logger.error(f"HTTP eval failed after {max_retries} retries")
+                                eval_error = f"HTTP error: {e}"
+                elif eval_server and not has_triton:
+                    eval_error = "no @triton.jit in code"
+                elif not eval_server:
+                    from ttt_discover.verl_integration.verl_reward import compute_score
+                    score = await asyncio.to_thread(
+                        compute_score,
+                        data_source=self._discover_config.get("data_source", "circle_packing"),
+                        solution_str=response_text,
+                        ground_truth=None,
+                        extra_info=extra_info,
+                    )
+                    if score == 0.0:
+                        eval_error = extra_info.get("_eval_msg", "")[:500]
             except Exception as e:
                 logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
                 score = 0.0
+                eval_error = f"{type(e).__name__}: {e}"
+        elif not code and not validate:
+            eval_error = "no code block extracted"
 
         output.reward_score = score
-        output.extra_fields["reward_extra_info"] = {"acc": float(score > 0)}
+        reward_extra = {"acc": float(score > 0)}
+        if eval_error:
+            reward_extra["eval_error"] = eval_error
+        output.extra_fields["reward_extra_info"] = reward_extra
 
         # Write to TransferQueue
         await self._write_to_tq(output, prompt, session_id, validate)
@@ -518,6 +564,8 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
         self.agent_loop_workers_class = DiscoverAgentLoopWorkerTQ
         super().__init__(*args, **kwargs)
 
+        gpu_eval_from_env = os.environ.get("GPU_EVAL_SERVER", "")
+
         self._discover_config = {
             "env_module": os.environ.get("DISCOVER_ENV_MODULE", "examples.circle_packing.env"),
             "env_class": os.environ.get("DISCOVER_ENV_CLASS", "CirclePackingEnv"),
@@ -532,7 +580,19 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "puct_c": float(os.environ.get("DISCOVER_PUCT_C", "1.0")),
             "topk_children": int(os.environ.get("DISCOVER_TOPK_CHILDREN", "2")),
             "max_buffer_size": int(os.environ.get("DISCOVER_MAX_BUFFER_SIZE", "1000")),
+            "gpu_eval_server": gpu_eval_from_env,
         }
+
+        # Load score_scale from env module if available (GPU mode)
+        try:
+            env_mod = importlib.import_module(self._discover_config["env_module"])
+            score_scale_map = getattr(env_mod, "SCORE_SCALE", None)
+            if score_scale_map and self._discover_config["problem_type"] in score_scale_map:
+                self._discover_config["score_scale"] = score_scale_map[self._discover_config["problem_type"]]
+        except Exception:
+            pass
+
+        logger.info(f"DiscoverAgentLoopManagerTQ init: GPU_EVAL_SERVER='{gpu_eval_from_env}', score_scale={self._discover_config.get('score_scale', 'N/A')}")
 
         resume_step = self._detect_puct_resume_step()
         self._puct_actor = PUCTSamplerActor.remote(

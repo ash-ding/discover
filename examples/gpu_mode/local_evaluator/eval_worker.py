@@ -92,6 +92,15 @@ def main():
         definition = make_task_definition(task_yml_path)
         task = definition.task
 
+        # Cap inner timeouts to fit within the outer eval timeout.
+        # The outer timeout kills our process, but grandchild processes
+        # (python3 eval.py) would survive as orphans and corrupt GPU state.
+        outer_timeout = int(os.environ.get("EVAL_TIMEOUT", "530"))
+        max_phase_timeout = max(outer_timeout // 3, 60)
+        task.test_timeout = min(task.test_timeout, max_phase_timeout)
+        task.benchmark_timeout = min(task.benchmark_timeout, max_phase_timeout)
+        task.ranked_timeout = min(task.ranked_timeout, max_phase_timeout)
+
         # Read submission code
         submission_code = submission_file.read_text()
 
@@ -149,7 +158,7 @@ def main():
                         "success": True,
                         "score_us": score_us,
                         "error": None,
-                        "benchmark_count": len(full_result.runs["leaderboard"].run.benchmarks)
+                        "benchmark_count": int(full_result.runs["leaderboard"].run.result.get("benchmark-count", 0))
                     }
                 except Exception as e:
                     result = {

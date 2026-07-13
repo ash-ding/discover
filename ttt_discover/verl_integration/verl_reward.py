@@ -6,8 +6,12 @@ This follows VERL's custom reward function protocol:
 
 import logging
 import re
+import threading
 
 logger = logging.getLogger(__name__)
+
+_evaluator_cache = {}
+_evaluator_lock = threading.Lock()
 
 
 def _extract_last_code_block(text: str) -> str:
@@ -31,21 +35,29 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
     eval_timeout = extra.get("eval_timeout", 530)
     num_cpus = extra.get("num_cpus_per_task", 1)
 
+    cache_key = (env_module, env_class, problem_type, eval_timeout)
     try:
-        import importlib
-        mod = importlib.import_module(env_module)
-        env_cls = getattr(mod, env_class)
-        reward_fn_cls = env_cls.reward_function
+        with _evaluator_lock:
+            if cache_key not in _evaluator_cache:
+                import importlib
+                mod = importlib.import_module(env_module)
+                env_cls = getattr(mod, env_class)
+                reward_fn_cls = env_cls.reward_function
+                _evaluator_cache[cache_key] = reward_fn_cls(
+                    problem_type=problem_type,
+                    log_dir=extra.get("log_dir", "./tinker_log"),
+                    eval_timeout=eval_timeout,
+                    num_cpus_per_task=num_cpus,
+                )
+            evaluator = _evaluator_cache[cache_key]
 
-        evaluator = reward_fn_cls(
-            problem_type=problem_type,
-            log_dir=extra.get("log_dir", "./tinker_log"),
-            eval_timeout=eval_timeout,
-            num_cpus_per_task=num_cpus,
-        )
-        # Pass full response text — evaluator extracts code internally
         result = evaluator.get_reward(solution_str, state=extra.get("state"))
+        # Persist eval error message for downstream logging
+        if extra is not None:
+            extra["_eval_msg"] = result.get("msg", "")
         return float(result.get("reward", 0.0))
     except Exception as e:
         logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
+        if extra is not None:
+            extra["_eval_msg"] = f"{type(e).__name__}: {e}"
         return 0.0
