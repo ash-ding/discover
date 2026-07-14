@@ -15,6 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from examples.gpu_mode.local_evaluator import LocalKernelEvaluator
+from examples.gpu_mode.local_evaluator.evaluator import PooledKernelEvaluator
 
 
 class EvalHandler(BaseHTTPRequestHandler):
@@ -136,25 +137,45 @@ def main():
     parser.add_argument("--timeout", type=int, default=530)
     parser.add_argument("--use-container", action="store_true", default=True)
     parser.add_argument("--no-container", dest="use_container", action="store_false")
+    parser.add_argument("--pooled", action="store_true", default=True,
+                        help="Use container pooling (persistent containers, default)")
+    parser.add_argument("--no-pooled", dest="pooled", action="store_false",
+                        help="Use per-eval container lifecycle (legacy)")
     args = parser.parse_args()
 
     gpu_ids = [int(x) for x in args.gpu_ids.split(",")] if args.gpu_ids else list(range(args.num_gpus))
     gpu_ids = gpu_ids[: args.num_gpus]
 
+    use_pooling = args.pooled and args.use_container
     evaluators = []
     for gid in gpu_ids:
-        print(f"Initializing evaluator for GPU {gid}...")
-        ev = LocalKernelEvaluator(gpu_id=gid, timeout=args.timeout, use_container=args.use_container)
+        if use_pooling:
+            print(f"Initializing pooled evaluator for GPU {gid}...")
+            ev = PooledKernelEvaluator(gpu_id=gid, timeout=args.timeout)
+        else:
+            print(f"Initializing evaluator for GPU {gid}...")
+            ev = LocalKernelEvaluator(gpu_id=gid, timeout=args.timeout, use_container=args.use_container)
         evaluators.append(ev)
         print(f"  GPU {gid} ready")
 
     EvalHandler.evaluators = evaluators
     EvalHandler.request_timeout = args.timeout + 60  # Give 60s buffer beyond eval timeout
 
-    # Limit concurrent requests to number of GPUs (one request per GPU max)
-    server = ThreadedHTTPServer(("0.0.0.0", args.port), EvalHandler, max_workers=len(evaluators))
-    print(f"Eval server listening on 0.0.0.0:{args.port} with {len(evaluators)} GPUs {gpu_ids}")
-    print(f"Max concurrent requests: {len(evaluators)}, Request timeout: {EvalHandler.request_timeout}s")
+    import atexit
+    def _shutdown_evaluators():
+        for ev in evaluators:
+            if hasattr(ev, "shutdown"):
+                try:
+                    ev.shutdown()
+                except Exception:
+                    pass
+    atexit.register(_shutdown_evaluators)
+
+    http_workers = max(len(evaluators) * 64, 256)
+    server = ThreadedHTTPServer(("0.0.0.0", args.port), EvalHandler, max_workers=http_workers)
+    mode = "pooled" if use_pooling else ("container" if args.use_container else "subprocess")
+    print(f"Eval server listening on 0.0.0.0:{args.port} with {len(evaluators)} GPUs {gpu_ids} ({mode} mode)")
+    print(f"HTTP workers: {http_workers}, Eval GPUs: {len(evaluators)}, Request timeout: {EvalHandler.request_timeout}s")
     server.serve_forever()
 
 

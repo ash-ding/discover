@@ -17,6 +17,7 @@ import json
 import time
 import logging
 import shutil
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, Literal
 
@@ -77,7 +78,7 @@ class LocalKernelEvaluator:
         self.worker_script = Path(__file__).parent / "eval_worker.py"
 
         # Container image name (same for both Podman and Docker)
-        self.container_image = "gpu-kernel-evaluator:latest"
+        self.container_image = "localhost/gpu-kernel-evaluator:latest"
 
         # Set Podman storage config to use custom location (workspace partition)
         # This must be set before any podman commands
@@ -512,3 +513,278 @@ class LocalKernelEvaluator:
             "stdout": "",
             "stderr": error_msg
         }
+
+
+class PooledKernelEvaluator:
+    """GPU kernel evaluator with persistent container pooling.
+
+    Instead of creating/destroying a container per eval, keeps a persistent
+    container running per GPU. Communication via stdin/stdout JSON lines.
+    Eliminates ~4s container lifecycle overhead per eval.
+
+    Falls back to LocalKernelEvaluator behavior for GPU crash recovery:
+    kills and restarts the container on catastrophic failure.
+    """
+
+    def __init__(
+        self,
+        gpu_id: int = 0,
+        timeout: int = 1200,
+        max_retries: int = 2,
+        penalty_score: float = -1_000_000,
+        container_runtime: Optional[ContainerRuntime] = None,
+    ):
+        self.gpu_id = gpu_id
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.penalty_score = penalty_score
+        self.lock = threading.Lock()
+        self.container_image = "localhost/gpu-kernel-evaluator:latest"
+        self._container_proc: Optional[subprocess.Popen] = None
+        self._container_name = f"eval_pool_gpu_{gpu_id}"
+
+        self._setup_podman_storage()
+        self.container_runtime = self._detect_runtime(container_runtime)
+        self._verify_gpu()
+        self._start_container()
+
+    def _setup_podman_storage(self):
+        project_root = Path(__file__).parent.parent.parent.parent
+        storage_conf = project_root / ".podman_storage" / "storage.conf"
+        if storage_conf.exists():
+            os.environ["CONTAINERS_STORAGE_CONF"] = str(storage_conf)
+
+    def _detect_runtime(self, forced: Optional[ContainerRuntime]) -> ContainerRuntime:
+        if forced in ["podman", "docker"]:
+            if shutil.which(forced):
+                return forced
+        for rt in ["podman", "docker"]:
+            if shutil.which(rt):
+                try:
+                    r = subprocess.run([rt, "info"], capture_output=True, timeout=5)
+                    if r.returncode == 0:
+                        return rt
+                except Exception:
+                    continue
+        raise RuntimeError("Container pooling requires podman or docker")
+
+    def _verify_gpu(self):
+        result = subprocess.run(
+            ["nvidia-smi", "-i", str(self.gpu_id), "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"GPU {self.gpu_id} not available")
+        logger.info(f"Pooled evaluator GPU {self.gpu_id}: {result.stdout.strip()}")
+
+    def _start_container(self):
+        self._cleanup_stale_container()
+
+        lib_dir = Path(__file__).parent.parent / "lib"
+        cmd = [
+            self.container_runtime, "run",
+            "-i",
+            "--name", self._container_name,
+            "--network", "none",
+            "-v", f"{lib_dir}:/workspace/lib:ro",
+        ]
+        if self.container_runtime == "podman":
+            cmd.extend(["--device", f"nvidia.com/gpu={self.gpu_id}"])
+        else:
+            cmd.extend(["--gpus", f"device={self.gpu_id}"])
+
+        cmd.extend(["--entrypoint", "python", self.container_image, "/workspace/pool_worker.py"])
+
+        logger.info(f"Starting pooled container for GPU {self.gpu_id}...")
+        self._container_proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+
+        # Wait for ready signal (with timeout)
+        ready_line = self._readline_with_timeout(timeout=120)
+        if ready_line is None:
+            stderr = ""
+            try:
+                self._container_proc.kill()
+                _, stderr = self._container_proc.communicate(timeout=5)
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Pool worker on GPU {self.gpu_id} failed to start. stderr: {stderr}"
+            )
+
+        try:
+            ready = json.loads(ready_line)
+            if ready.get("status") != "ready":
+                raise ValueError(f"Unexpected ready signal: {ready}")
+        except (json.JSONDecodeError, ValueError) as e:
+            self._container_proc.kill()
+            raise RuntimeError(f"Pool worker ready handshake failed: {e}")
+
+        logger.info(f"Pooled container ready for GPU {self.gpu_id}")
+
+    def _cleanup_stale_container(self):
+        for action in ["kill", "rm"]:
+            try:
+                subprocess.run(
+                    [self.container_runtime, action, self._container_name],
+                    capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+
+    def _readline_with_timeout(self, timeout: int = 60) -> Optional[str]:
+        result = [None]
+
+        def reader():
+            try:
+                result[0] = self._container_proc.stdout.readline()
+            except Exception:
+                pass
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None
+        line = result[0]
+        if line is None or line == "":
+            return None
+        return line.strip()
+
+    def evaluate(
+        self,
+        submission_code: str,
+        task_name: str = "trimul",
+        gpu_type: str = "H100",
+    ) -> Dict[str, Any]:
+        with self.lock:
+            return self._evaluate_locked(submission_code, task_name, gpu_type)
+
+    def _evaluate_locked(
+        self,
+        submission_code: str,
+        task_name: str,
+        gpu_type: str,
+    ) -> Dict[str, Any]:
+        for attempt in range(1 + self.max_retries):
+            if self._container_proc is None or self._container_proc.poll() is not None:
+                logger.warning(f"Container for GPU {self.gpu_id} is dead, restarting...")
+                try:
+                    self._restart_container()
+                except Exception as e:
+                    return self._make_failure_result(f"Container restart failed: {e}")
+
+            request = json.dumps({
+                "code": submission_code,
+                "task_name": task_name,
+                "gpu_type": gpu_type,
+                "timeout": self.timeout,
+            })
+
+            try:
+                self._container_proc.stdin.write(request + "\n")
+                self._container_proc.stdin.flush()
+            except (BrokenPipeError, OSError) as e:
+                logger.warning(f"Broken pipe writing to GPU {self.gpu_id} container: {e}")
+                if attempt < self.max_retries:
+                    self._restart_container()
+                    continue
+                return self._make_failure_result(f"Container pipe broken: {e}")
+
+            response_line = self._readline_with_timeout(timeout=self.timeout + 60)
+            if response_line is None:
+                logger.warning(f"Timeout/EOF reading from GPU {self.gpu_id} container")
+                if attempt < self.max_retries:
+                    self._restart_container()
+                    continue
+                return self._make_failure_result(f"Container response timeout after {self.timeout}s")
+
+            try:
+                result = json.loads(response_line)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON from GPU {self.gpu_id} container: {e}")
+                if attempt < self.max_retries:
+                    self._restart_container()
+                    continue
+                return self._make_failure_result(f"Invalid container response: {e}")
+
+            if self._is_gpu_crash(result):
+                logger.warning(f"GPU crash on GPU {self.gpu_id}, attempt {attempt + 1}/{1 + self.max_retries}")
+                if attempt < self.max_retries:
+                    self._restart_container()
+                    time.sleep(2)
+                    continue
+                return self._make_failure_result("GPU crash, recovery failed")
+
+            result.setdefault("stdout", "")
+            result.setdefault("stderr", "")
+            return result
+
+        return self._make_failure_result("Max retries exceeded")
+
+    def _is_gpu_crash(self, result: Dict[str, Any]) -> bool:
+        if result.get("gpu_crash"):
+            return True
+        error = str(result.get("error", ""))
+        gpu_error_keywords = [
+            "CUDA error", "CUDA out of memory", "illegal memory access",
+            "cudaGetLastError", "Segmentation fault", "CUDA_ERROR",
+        ]
+        return any(kw in error for kw in gpu_error_keywords)
+
+    def _restart_container(self):
+        logger.info(f"Restarting container for GPU {self.gpu_id}...")
+        if self._container_proc is not None:
+            try:
+                self._container_proc.kill()
+                self._container_proc.wait(timeout=5)
+            except Exception:
+                pass
+        self._cleanup_stale_container()
+        self._recover_gpu()
+        self._start_container()
+
+    def _recover_gpu(self):
+        try:
+            subprocess.run(["fuser", "-k", f"/dev/nvidia{self.gpu_id}"],
+                           capture_output=True, timeout=10)
+            time.sleep(1)
+        except Exception:
+            pass
+        try:
+            subprocess.run(["nvidia-smi", "--gpu-reset", "-i", str(self.gpu_id)],
+                           capture_output=True, timeout=10, check=False)
+        except Exception:
+            pass
+        time.sleep(2)
+        result = subprocess.run(["nvidia-smi", "-i", str(self.gpu_id)],
+                                capture_output=True, timeout=30)
+        if result.returncode == 0:
+            logger.info(f"GPU {self.gpu_id} recovered")
+        else:
+            logger.warning(f"GPU {self.gpu_id} recovery verification failed")
+
+    def _make_failure_result(self, error_msg: str) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "score_us": self.penalty_score,
+            "error": error_msg,
+            "stdout": "",
+            "stderr": error_msg,
+        }
+
+    def shutdown(self):
+        if self._container_proc is not None:
+            try:
+                self._container_proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self._container_proc.kill()
+                self._container_proc.wait(timeout=10)
+            except Exception:
+                pass
+        self._cleanup_stale_container()
+        logger.info(f"Pooled container for GPU {self.gpu_id} shut down")

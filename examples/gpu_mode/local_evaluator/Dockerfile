@@ -35,8 +35,9 @@ RUN pip install \
 # Create workspace
 WORKDIR /workspace
 
-# Copy evaluation worker script
+# Copy evaluation worker scripts
 COPY eval_worker.py /workspace/
+COPY pool_worker.py /workspace/
 
 # The lib directory will be mounted at runtime
 # No need to copy it into the image

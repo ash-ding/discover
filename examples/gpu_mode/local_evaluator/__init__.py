@@ -5,6 +5,6 @@ Provides fault-tolerant local evaluation for GPU kernels without Modal dependenc
 Supports both Podman (preferred) and Docker for container isolation.
 """
 
-from .evaluator import LocalKernelEvaluator
+from .evaluator import LocalKernelEvaluator, PooledKernelEvaluator
 
-__all__ = ["LocalKernelEvaluator"]
+__all__ = ["LocalKernelEvaluator", "PooledKernelEvaluator"]
