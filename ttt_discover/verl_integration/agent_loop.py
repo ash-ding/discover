@@ -99,6 +99,9 @@ class PUCTSamplerActor:
     def get_step(self):
         return self._step
 
+    def get_sample_stats(self):
+        return self.sampler.get_sample_stats()
+
 
 @ray.remote
 class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
@@ -248,9 +251,11 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
 
             # Check for errors
             valid_results = []
+            error_count = 0
             for i, r in enumerate(results):
                 if isinstance(r, Exception):
                     logger.error(f"Session {i} failed: {type(r).__name__}: {r}")
+                    error_count += 1
                 else:
                     valid_results.append(r)
             # Batch PUCT update
@@ -282,6 +287,12 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     ray.get(self._puct_actor.record_failed_rollouts.remote(
                         failed_parents, step=global_steps
                     ))
+
+                logger.info(
+                    f"Prompt {uid} rollout summary: "
+                    f"total={len(results)}, valid={len(valid_results)}, errors={error_count}, "
+                    f"success={len(successful_states)}, failed={len(failed_parents)}"
+                )
 
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
 
@@ -330,6 +341,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         )
         budget_exhausted = (not hit_stop and len(p1_tokens) >= phase1_budget)
 
+        gen_case = "A"
+        p2_len = 0
+
         if not budget_exhausted:
             # Case A: model stopped naturally — thinking + answer complete
             response_ids = p1_tokens
@@ -338,6 +352,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         elif self._contains_pattern(p1_tokens, "</think>"):
             # Case B: budget exhausted but </think> present — thinking done,
             # answer truncated. Continue generating without prefill.
+            gen_case = "B"
             phase2_prompt = prompt_ids + p1_tokens
             phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
             if phase2_budget <= 0:
@@ -353,12 +368,14 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 )
                 p2_tokens = phase2_output.token_ids
                 p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
+                p2_len = len(p2_tokens)
                 response_ids = p1_tokens + p2_tokens
                 response_logprobs = p1_logprobs + p2_logprobs
                 response_mask = [1] * len(p1_tokens) + [1] * len(p2_tokens)
         else:
             # Case C: budget exhausted, no </think> — thinking truncated.
             # Inject prefill to force end of thinking and start answer.
+            gen_case = "C"
             phase2_prompt = prompt_ids + p1_tokens + self._phase2_prefill_ids
             phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
             if phase2_budget <= 0:
@@ -374,6 +391,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 )
                 p2_tokens = phase2_output.token_ids
                 p2_logprobs = phase2_output.log_probs or [0.0] * len(p2_tokens)
+                p2_len = len(p2_tokens)
 
                 response_ids = p1_tokens + self._phase2_prefill_ids + p2_tokens
                 response_logprobs = (
@@ -407,6 +425,8 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         code = self._extract_last_code_block(response_text)
         score = 0.0
         eval_error = ""
+        raw_score_us = None
+        t_eval = time.time()
 
         if code and not validate:
             try:
@@ -430,17 +450,21 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     eval_timeout = self._discover_config.get("eval_timeout", 530) + 60
                     score_scale = self._discover_config.get("score_scale", 1500)
                     payload = json.dumps({"code": code, "task_name": task_name, "gpu_type": "H100"}).encode()
+                    eval_url = eval_server.rstrip("/")
+                    if not eval_url.startswith("http"):
+                        eval_url = f"http://{eval_url}"
                     max_retries = 2
                     for attempt in range(1 + max_retries):
                         try:
-                            req = urllib.request.Request(f"http://{eval_server}/", data=payload,
+                            req = urllib.request.Request(f"{eval_url}/", data=payload,
                                                          headers={"Content-Type": "application/json"})
-                            logger.debug(f"HTTP POST to http://{eval_server}/, payload_size={len(payload)}, timeout={eval_timeout}, attempt={attempt}")
+                            logger.debug(f"HTTP POST to {eval_url}/, payload_size={len(payload)}, timeout={eval_timeout}, attempt={attempt}")
                             result = await asyncio.to_thread(
                                 lambda: json.loads(urllib.request.urlopen(req, timeout=eval_timeout).read())
                             )
                             if result.get("success"):
-                                score = float(score_scale / result["score_us"])
+                                raw_score_us = result["score_us"]
+                                score = float(score_scale / raw_score_us)
                             else:
                                 eval_error = str(result.get("error", ""))[:500]
                             logger.debug(f"HTTP result: success={result.get('success')}, score_us={result.get('score_us')}, final_score={score}")
@@ -472,10 +496,23 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         elif not code and not validate:
             eval_error = "no code block extracted"
 
+        eval_time = time.time() - t_eval
+
         output.reward_score = score
         reward_extra = {"acc": float(score > 0)}
         if eval_error:
             reward_extra["eval_error"] = eval_error
+        if raw_score_us is not None:
+            reward_extra["score_us"] = raw_score_us
+        reward_extra["gen_case"] = gen_case
+        reward_extra["p1_len"] = len(p1_tokens)
+        reward_extra["p2_len"] = p2_len
+        reward_extra["gen_time_s"] = round(gen_time, 3)
+        reward_extra["eval_time_s"] = round(eval_time, 3)
+        puct_state = prompt.get("_puct_state")
+        if puct_state is not None:
+            reward_extra["puct_parent_id"] = getattr(puct_state, "id", None)
+            reward_extra["puct_parent_value"] = getattr(puct_state, "value", None)
         output.extra_fields["reward_extra_info"] = reward_extra
 
         # Write to TransferQueue
