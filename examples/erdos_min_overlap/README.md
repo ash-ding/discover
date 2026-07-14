@@ -1,67 +1,66 @@
-# Erdős Minimum Overlap Problem
+# Erdos Minimum Overlap Problem
 
 ## Overview
 
-This task tackles the Erdős minimum overlap problem - finding an upper bound for the constant C₅ that appears in harmonic analysis.
+This task tackles the Erdos minimum overlap problem - finding an upper bound for the constant C5 that appears in harmonic analysis.
 
-## Problem Statement
-
-Find a step function h: [0, 2] → [0, 1] that **minimizes** the overlap integral:
+Find a step function h: [0, 2] -> [0, 1] that **minimizes** the overlap integral:
 
 ```
-C₅ = max_k ∫ h(x)(1 - h(x+k)) dx
+C5 = max_k integral h(x)(1 - h(x+k)) dx
 ```
 
-**Constraints**:
-1. h(x) ∈ [0, 1] for all x
-2. ∫₀² h(x) dx = 1
+**Constraints**: h(x) in [0, 1], integral_0^2 h(x) dx = 1
 
-**Lower is better** - smaller C₅ values provide tighter upper bounds on the Erdős constant.
+**Current record**: C5 <= 0.38092. **Target**: C5 <= 0.38080.
 
-## Current Record
-
-- Paper record: C₅ ≤ 0.38092
-- Target goal: C₅ ≤ 0.38080
-
-## Running
+## Prerequisites
 
 ```bash
-# Quick validation (1 epoch)
-bash run.sh validate
-
-# Full training (50 epochs)
-bash run.sh full
+conda activate verl_discover
+export WANDB_MODE=offline
+export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
 ```
 
-## Configuration
+## Launch (VERL Colocate Mode)
 
-- **Paper config**: `config_paper.yaml` - 50 epochs, full training
-- **Validation config**: `config_validate.yaml` - 1 epoch, quick test
+```bash
+# Smoke test (~5 min)
+TOTAL_EPOCHS=1 ROLLOUT_N=4 TRAIN_BATCH_SIZE=2 bash run_verl.sh erdos
 
-Key parameters (from paper Table 9):
-- group_size: 64
-- groups_per_batch: 8
-- num_epochs: 50 (paper) / 1 (validate)
-- learning_rate: 4e-5
-- kl_penalty_coef: 0.1
+# Validation (1 epoch)
+TOTAL_EPOCHS=1 bash run_verl.sh erdos
 
-## Environment
+# Full training
+TOTAL_EPOCHS=50 bash run_verl.sh erdos
+```
 
-- **CPUs per task**: 1
-- **Timeout**: 1100s
-- **Search budget**: 1000s in code
+## Key Parameters
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Learning rate | 4e-5 | Standard |
+| KL coefficient | 0.1 | Standard |
+| Eval timeout | 1100s | Longer than default |
+| CPUs per task | 1 | |
+| Data file | `data/erdos_min_overlap_train.parquet` | |
+
+## Monitoring
+
+- **Metric**: `env/all/raw_score/min` (**minimization** task)
+- **Target**: C5 <= 0.38080
+- **Lower is better**: Smaller C5 = tighter upper bound
 
 ## Discretization
 
 The continuous function h is discretized as n_points samples over [0, 2]:
 - dx = 2.0 / n_points
-- 0 ≤ h[i] ≤ 1 for all i
-- sum(h) * dx = 1 (equivalently: sum(h) == n_points / 2)
+- 0 <= h[i] <= 1 for all i
+- sum(h) * dx = 1
+- Evaluation: C5 = max(np.correlate(h, 1-h, mode="full") * dx)
 
-The evaluation computes: C₅ = max(np.correlate(h, 1-h, mode="full") * dx)
+## Resume Training
 
-## Output
-
-Logs to `tinker_log/erdos-{paper,validate}/`
-
-Monitor `env/all/raw_score/min` in WandB - **lower is better** (minimization task).
+```bash
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/<experiment> INPLACE=true bash run_verl.sh erdos
+```

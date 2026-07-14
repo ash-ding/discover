@@ -8,57 +8,55 @@ This is a classic optimization problem in computational geometry where the goal 
 
 ## Variants
 
-- **26 circles** (default): Target sum of radii ≥ 2.636
-- **32 circles**: Target sum of radii ≥ 2.940
+- **26 circles** (`circle_packing` / `cp26`): Target sum of radii >= 2.636
+- **32 circles** (`cp32`): Target sum of radii >= 2.940
 
-The problem difficulty increases significantly with more circles due to the exponentially larger search space.
-
-## Configuration
-
-- **Paper config**: `config_paper.yaml` (50 epochs, full training)
-- **Validation config**: `config_validate.yaml` (1 epoch, quick test)
-
-## Running
+## Prerequisites
 
 ```bash
-# Quick validation (1 epoch, 26 circles)
-bash run.sh validate
-
-# Full training (50 epochs, 26 circles)
-bash run.sh full
-
-# Custom config
-export TTT_CONFIG_PATH=path/to/custom_config.yaml
-bash run.sh full
+conda activate verl_discover
+export WANDB_MODE=offline
+export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
 ```
+
+## Launch (VERL Colocate Mode)
+
+```bash
+# Smoke test (~5 min, 8 samples)
+TOTAL_EPOCHS=1 ROLLOUT_N=4 TRAIN_BATCH_SIZE=2 bash run_verl.sh circle_packing
+
+# Validation (1 epoch, 512 samples)
+TOTAL_EPOCHS=1 bash run_verl.sh circle_packing
+
+# Full training (50 epochs, 512 samples/step)
+TOTAL_EPOCHS=50 bash run_verl.sh circle_packing
+
+# 32 circles variant
+TOTAL_EPOCHS=50 bash run_verl.sh cp32
+```
+
+## Key Parameters
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Learning rate | 4e-5 | Standard |
+| KL coefficient | 0.1 | Standard |
+| Eval timeout | 530s | Per-sample code execution |
+| CPUs per task | 1 | Sandbox evaluation |
+| Data file | `data/circle_packing_train.parquet` | |
 
 ## Monitoring
 
-Track progress in WandB:
 - **Metric**: `env/all/raw_score/max` (maximization task)
-- **Target**: ≥ 2.636 (26 circles) or ≥ 2.940 (32 circles)
-- **Higher is better**: Larger sum of radii means better packing
+- **Target**: >= 2.636 (26 circles) or >= 2.940 (32 circles)
+- **Higher is better**: Larger sum of radii = better packing
 
-## Performance Notes
-
-- **CPU usage**: Moderate (1 CPU per evaluation)
-- **GPU memory**: TP=4 inference (GPUs 0-3) + 1 training GPU (GPU 4)
-- **Expected runtime**:
-  - Validation (1 epoch): ~30-60 minutes
-  - Full training (50 epochs): ~40-50 hours
-
-## Environment
+## Resume Training
 
 ```bash
-conda activate discover_math
+# Resume from checkpoint (same directory)
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/<experiment> INPLACE=true bash run_verl.sh circle_packing
+
+# Resume into new directory
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/<experiment> bash run_verl.sh circle_packing
 ```
-
-## Algorithm Approach
-
-The model learns to generate Python code that implements circle packing algorithms. Common strategies discovered:
-- Greedy placement with local optimization
-- Simulated annealing or genetic algorithms
-- Grid-based initialization with gradient descent
-- Constraint satisfaction approaches
-
-Best results typically come from combining multiple algorithmic ideas and parameter tuning.

@@ -4,54 +4,50 @@
 
 This task optimizes autocorrelation inequalities - a mathematical problem in harmonic analysis. The goal is to find sequences of non-negative numbers that minimize certain autocorrelation-based evaluation functions.
 
-## Task Types
+### Variants
 
-### AC1 (First AC Inequality)
-- **Metric**: `env/all/raw_score/max` (maximization)
-- **Evaluation**: Based on ratio `2n * max(b) / sum(a)²`
-- **Goal**: Find sequences that maximize this ratio
+- **AC1**: Based on ratio `2n * max(b) / sum(a)^2` — maximize this ratio
+- **AC2**: Based on L2/L1/Linf norms of autocorrelation — maximize the lower bound C
 
-### AC2 (Second AC Inequality)  
-- **Metric**: `env/all/raw_score/max` (maximization)
-- **Evaluation**: Based on L2/L1/Linf norms of autocorrelation
-- **Goal**: Find sequences that maximize the lower bound C
-
-## Running
+## Prerequisites
 
 ```bash
-# Quick validation (1 epoch, AC1)
-bash run.sh validate ac1
-
-# Full training (50 epochs, AC1)
-bash run.sh full ac1
-
-# Quick validation (1 epoch, AC2)
-bash run.sh validate ac2
-
-# Full training (50 epochs, AC2)
-bash run.sh full ac2
+conda activate verl_discover
+export WANDB_MODE=offline
+export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
 ```
 
-## Configuration
+## Launch (VERL Colocate Mode)
 
-- **Paper config**: `config_paper.yaml` - 50 epochs, full training
-- **Validation config**: `config_validate.yaml` - 1 epoch, quick test
+```bash
+# Smoke test (~5 min)
+TOTAL_EPOCHS=1 ROLLOUT_N=4 TRAIN_BATCH_SIZE=2 bash run_verl.sh ac1
 
-Key parameters (from paper Table 9):
-- group_size: 64
-- groups_per_batch: 8  
-- num_epochs: 50 (paper) / 1 (validate)
-- learning_rate: 4e-5
-- kl_penalty_coef: 0.1
+# Validation (1 epoch)
+TOTAL_EPOCHS=1 bash run_verl.sh ac1
 
-## Environment
+# Full training
+TOTAL_EPOCHS=50 bash run_verl.sh ac1    # AC1 variant
+TOTAL_EPOCHS=50 bash run_verl.sh ac2    # AC2 variant
+```
 
-- **CPUs per task**: 2
-- **Timeout**: 1100s
-- **Search budget**: Configurable in prompt
+## Key Parameters
 
-## Output
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Learning rate | 4e-5 | Standard |
+| KL coefficient | 0.1 | Standard |
+| Eval timeout | 1100s | Longer than default (CPU-intensive eval) |
+| CPUs per task | 2 | Higher than default |
+| Data files | `data/ac_inequalities_ac1_train.parquet` | AC2 uses `_ac2_` variant |
 
-Logs to `tinker_log/ac{1,2}-{paper,validate}/`
+## Monitoring
 
-Monitor `env/all/raw_score/max` in WandB - higher is better.
+- **Metric**: `env/all/raw_score/max` (maximization for both AC1 and AC2)
+- **Higher is better**
+
+## Resume Training
+
+```bash
+TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/<experiment> INPLACE=true bash run_verl.sh ac1
+```

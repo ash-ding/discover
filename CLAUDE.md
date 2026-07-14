@@ -61,70 +61,28 @@ See `requirements/README.md` for task-specific extra dependencies.
 
 vLLM is managed automatically by VERL's colocate infrastructure. **No manual server management needed.** The `run_verl.sh` script handles everything.
 
-## Configuration System
+## Pre-Flight Checklist
 
-All tasks use YAML configuration files instead of hardcoded parameters.
+Before ANY training run, ensure these environment variables are set:
 
-### Structure
-Each task has:
-- **config_paper.yaml** — Full 50-epoch run (paper parameters from Table 9)
-- **config_validate.yaml** — 1-epoch validation run (same parameters, epochs=1)
-- **run.sh** — Launcher script that loads config and runs experiment
-
-### Running Tasks
 ```bash
-cd examples/<task>
-bash run.sh full      # Uses config_paper.yaml
-bash run.sh validate  # Uses config_validate.yaml
+# 1. Activate the unified conda environment
+conda activate verl_discover
+
+# 2. Use local model path (default Qwen/Qwen3-8B downloads from HF Hub — will hang without HF_TOKEN)
+export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
+
+# 3. WandB offline mode (avoids API key auth errors)
+export WANDB_MODE=offline
+
+# 4. Verify parquet data exists for your task
+ls data/<task>_train.parquet
 ```
 
-### Custom Configs
+**Add to `~/.bashrc` for persistence:**
 ```bash
-export TTT_CONFIG_PATH=/path/to/custom_config.yaml
-cd examples/<task>
-bash run.sh full
-```
-
-The config loader (`ttt_discover/utils/config_loader.py`) parses YAML and passes parameters to DiscoverConfig.
-
-### YAML Configuration Files
-
-Each task has two standard configs:
-- **`config_paper.yaml`** - Full 50-epoch training (Table 9 parameters)
-- **`config_validate.yaml`** - Quick 1-epoch validation (same params except num_epochs)
-
-### Loading Priority
-
-When a task starts, configuration is loaded in this order:
-1. **YAML file** (via `TTT_CONFIG_PATH` environment variable) - highest priority
-2. **Hard-coded defaults** in task's `env.py` file
-3. **DiscoverConfig defaults** in `discovery.py`
-
-If `TTT_CONFIG_PATH` is set, the YAML config overrides all defaults.
-
-### Environment Variables
-
-Some parameters are controlled externally via environment variables, **not** YAML:
-
-| Variable | Purpose | Default | Set By |
-|----------|---------|---------|--------|
-| `VLLM_BASE_URL` | vLLM server address | `http://localhost:8888` | `run.sh` or manual |
-| `WANDB_MODE` | WandB logging mode | `offline` | `run.sh` or `~/.bashrc` |
-| `CUDA_VISIBLE_DEVICES` | GPU visibility | `0,1,2,3,4` | `run.sh` |
-| `VLLM_ALLOW_RUNTIME_LORA_UPDATING` | Enable LoRA hot-reload | `true` | `start_vllm.sh` (required) |
-| `PYTORCH_CUDA_ALLOC_CONF` | CUDA allocator config | `expandable_segments:True` | `run.sh` |
-
-**Critical**: `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` must be set **before** starting vLLM. Without it, training will fail with "LoRA adapter not loaded" errors. The `start_vllm.sh` script sets this automatically.
-
-### Configuration Validation
-
-Before starting experiments, validate your config:
-```bash
-# Quick syntax check
-python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
-
-# Full validation (GPU config, parameter ranges, etc.)
-# See .claude/skills/config-validation.md for detailed checks
+export WANDB_MODE=offline
+export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
 ```
 
 ## Mandatory Rules
@@ -137,17 +95,25 @@ python3 -c "import yaml; yaml.safe_load(open('config_paper.yaml'))"
 
 ```bash
 conda activate verl_discover
+export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
+export WANDB_MODE=offline
 
 # Run any task (VERL manages vLLM internally, no manual server needed)
 TOTAL_EPOCHS=50 bash run_verl.sh circle_packing   # Full training
 TOTAL_EPOCHS=1  bash run_verl.sh circle_packing   # Validation (1 epoch)
 
-# Available tasks: circle_packing, cp32, ac1, ac2, erdos, denoising, gpu_mode, ahc039
+# Smoke test (fast, minimal samples)
+TOTAL_EPOCHS=1 ROLLOUT_N=4 TRAIN_BATCH_SIZE=2 bash run_verl.sh circle_packing
 ```
 
 For AHC (long prompts), use SP=2 to avoid OOM:
 ```bash
 TOTAL_EPOCHS=50 SP_SIZE=2 bash run_verl.sh ahc039
+```
+
+For GPU Mode, set the eval server:
+```bash
+GPU_EVAL_SERVER=http://10.241.128.30:8890 TOTAL_EPOCHS=50 bash run_verl.sh gpu_mode
 ```
 
 ### Resume Training
@@ -166,17 +132,90 @@ TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run bash run_verl.sh circ
 
 ### Available Tasks
 
-| Task | Environment | Requirements File | Notes |
-|------|-------------|-------------------|-------|
-| Circle Packing | `discover_math` | `requirements-math.txt` | 26 or 32 circles |
-| AC Inequalities | `discover_math` | `requirements-math.txt` | AC1 (minimize) or AC2 (maximize) |
-| Erdős Min Overlap | `discover_math` | `requirements-math.txt` | C₅ constant optimization |
-| Denoising | `discover_denoising` | `denoising/requirements-denoising.txt` | Requires openproblems patch |
-| GPU Mode | `discover_gpumode` | `requirements-gpumode.txt` | Local evaluation only |
-| AHC | `discover_ale` | `requirements-ahc.txt` | Must run in container |
+| Task | Command | Metric | Special | README |
+|------|---------|--------|---------|--------|
+| Circle Packing 26 | `bash run_verl.sh circle_packing` | `raw_score/max` >= 2.636 | | [README](examples/circle_packing/README.md) |
+| Circle Packing 32 | `bash run_verl.sh cp32` | `raw_score/max` >= 2.940 | | [README](examples/circle_packing/README.md) |
+| AC Inequalities 1 | `bash run_verl.sh ac1` | `raw_score/max` | timeout=1100s | [README](examples/ac_inequalities/README.md) |
+| AC Inequalities 2 | `bash run_verl.sh ac2` | `raw_score/max` | timeout=1100s | [README](examples/ac_inequalities/README.md) |
+| Erdos Min Overlap | `bash run_verl.sh erdos` | `raw_score/min` <= 0.380 | timeout=1100s | [README](examples/erdos_min_overlap/README.md) |
+| Denoising | `bash run_verl.sh denoising` | `raw_score/max` | openproblems patch | [README](examples/denoising/README.md) |
+| GPU Mode (trimul) | `bash run_verl.sh gpu_mode` | `raw_score/min` | eval GPU needed | [README](examples/gpu_mode/README.md) |
+| AHC 039 | `SP_SIZE=2 bash run_verl.sh ahc039` | `raw_score/max` | container + SP=2 | [README](examples/ahc/README.md) |
 
-Each task has detailed documentation in its respective `examples/<task>/README.md`.
+All tasks use the unified `verl_discover` conda environment.
 
+
+### Multi-Node Training
+
+For 2-node training (16 GPUs total):
+
+```bash
+# 1. Start Ray cluster
+bash scripts/start_ray_cluster.sh
+
+# 2. Run training with NNODES=2
+NNODES=2 TOTAL_EPOCHS=50 bash run_verl.sh circle_packing
+
+# 3. Stop cluster when done
+bash scripts/start_ray_cluster.sh stop
+```
+
+The Ray head node runs on Node 0 (10.241.128.30), worker on Node 1 (10.241.128.16). SSH must be passwordless between nodes. Override via `HEAD_NODE` and `WORKER_NODE` env vars.
+
+### Overridable Environment Variables
+
+All variables below can be set before `bash run_verl.sh <task>`. Task-specific defaults are in `run_verl.sh`.
+
+**Model & Infrastructure:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MODEL_PATH` | `Qwen/Qwen3-8B` | Model path. **Use local path** to avoid HF Hub download |
+| `NGPUS_PER_NODE` | `8` | GPUs per node |
+| `NNODES` | `1` | Number of nodes (set 2 for multi-node) |
+| `SP_SIZE` | `1` | Sequence parallel size (set 2 for AHC) |
+| `ROLLOUT_TP` | `4` | vLLM tensor parallel size |
+| `ROLLOUT_GPU_MEM_UTIL` | `0.5` | vLLM GPU memory fraction |
+
+**Training:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TOTAL_EPOCHS` | `1` | Training epochs (50 for full run) |
+| `ROLLOUT_N` | `64` | Completions per prompt |
+| `TRAIN_BATCH_SIZE` | `8` | Prompts per batch |
+| `LORA_RANK` | `32` | LoRA rank and alpha |
+| `ACTOR_LR` | Task-dependent | Learning rate |
+| `KL_COEF` | Task-dependent | KL penalty coefficient |
+| `SAVE_FREQ` | `0` | Checkpoint save frequency (0 = every step) |
+
+**PUCT Sampling:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DISCOVER_PUCT_C` | `1.0` | PUCT exploration constant |
+| `DISCOVER_TOPK_CHILDREN` | `2` | Top-k children in PUCT tree |
+| `DISCOVER_MAX_BUFFER_SIZE` | `1000` | Max PUCT buffer size |
+
+**Logging:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `WANDB_MODE` | `online` | **Set to `offline`** to avoid auth errors |
+| `WANDB_API_KEY` | (none) | Required only if `WANDB_MODE=online` |
+| `WANDB_ENTITY` | (none) | WandB team/org name |
+| `VERL_LOGGING_LEVEL` | `INFO` | Agent loop log verbosity |
+
+**GPU Mode Only:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GPU_EVAL_SERVER` | (empty) | HTTP eval server URL for remote evaluation |
+| `KERNEL_EVAL_GPU` | `0` | GPU ID for local kernel evaluation |
+| `KERNEL_EVAL_TIMEOUT` | `1200` | Per-kernel eval timeout (seconds) |
+| `KERNEL_EVAL_RETRIES` | `2` | Eval retry count |
+| `KERNEL_EVAL_USE_CONTAINER` | `true` | Use Docker/Podman isolation |
 
 ## Code Architecture
 
@@ -285,38 +324,28 @@ For AHC tasks, the job must run inside `yimjk/ale-bench:cpp20-202301` container.
 - **Shared memory**: Add `--shm-size=16g` to podman run
 - **GPU access**: Use `--device nvidia.com/gpu=all`
 
-## Key Configuration Parameters
+## Task-Specific Parameters
 
-All tasks now use YAML configuration files (`config_paper.yaml`, `config_validate.yaml`). Below are the key parameters and their meanings:
+Parameters that differ from defaults (bold = non-standard):
 
-| Parameter | Default | AHC | GPU Mode | Notes |
-|-----------|---------|-----|----------|-------|
-| `model_name` | `"Qwen/Qwen3-8B"` | same | same | Must match vLLM model |
-| `use_local_backend` | `True` | `True` | `True` | Enables local_backend/ adapter |
-| `inference_tp_size` | `4` | `4` | `4` | Must match vLLM `--tensor-parallel-size` |
-| `max_model_len` | `32768` | `32768` | `32768` | Must match vLLM `--max-model-len` |
-| `group_size` | `64` | `64` | `64` | Completions per prompt |
-| `groups_per_batch` | `8` | `8` | `8` | Different prompts per step |
-| `num_epochs` | `50` | `50` | `50` | Training steps (1 for validate) |
-| `phase1_max_tokens` | `26000` | **22000** | `26000` | Prompt + thinking budget |
-| `kl_penalty_coef` | `0.1` | **0.01** | **0.01** | KL penalty coefficient |
-| `lora_rank` | `32` | `32` | `32` | LoRA rank |
-| `learning_rate` | `4e-5` | **2e-5** | `4e-5` | Adam learning rate |
-| `training_gpu_ids` | `[4,5,6,7]` | same | same | Multi-GPU parallel training (4-way DP) |
-| `training_batch_size` | `1` | `1` | `1` | Per-GPU micro batch size (keep 1 for 32K) |
+| Parameter | Default | AHC | GPU Mode |
+|-----------|---------|-----|----------|
+| `phase1_max_tokens` | `26000` | **22000** | `26000` |
+| `kl_penalty_coef` | `0.1` | **0.01** | **0.01** |
+| `learning_rate` | `4e-5` | **2e-5** | `4e-5` |
+| `eval_timeout` | `530s` | **600s** | `530s` |
+| `num_cpus_per_task` | `1` | **2** | `1` |
+| `SP_SIZE` | `1` | **2** | `1` |
 
-**Task-specific parameter overrides** (bold = differs from default):
-- **AHC**: Lower all three key params (phase1_max_tokens, kl_penalty_coef, learning_rate)
-- **GPU Mode**: Lower kl_penalty_coef only
-- **All others**: Use default values from Table 9
+These are handled automatically by `run_verl.sh` — no manual override needed unless experimenting.
 
-**Config tiers** (all use same hyperparameters, only scale differs):
+**Config tiers** (via env var overrides to `run_verl.sh`):
 
-| Config | group_size | groups_per_batch | samples/step | epochs | Purpose |
-|--------|-----------|-----------------|-------------|--------|---------|
-| `config_paper.yaml` | 64 | 8 | 512 | 50 | Full paper reproduction |
-| `config_validate.yaml` | 64 | 8 | 512 | 1 | Pre-training verification |
-| `config_smoke_test.yaml` | 4 | 2 | 8 | 1 | Quick code validation |
+| Tier | ROLLOUT_N | TRAIN_BATCH_SIZE | samples/step | TOTAL_EPOCHS | Purpose |
+|------|-----------|-----------------|-------------|--------------|---------|
+| Full | 64 | 8 | 512 | 50 | Paper reproduction |
+| Validate | 64 | 8 | 512 | 1 | Pre-training check |
+| Smoke test | 4 | 2 | 8 | 1 | Quick code validation |
 
 ## Testing
 
@@ -401,16 +430,10 @@ The VERL integration is **task-agnostic**. Custom AgentLoop reads task config fr
 
 ## WandB Configuration
 
-**推荐配置（添加到 `~/.bashrc`）：**
+Add to `~/.bashrc`:
 
 ```bash
-# WandB offline mode (避免 API key 错误)
 export WANDB_MODE=offline
 ```
 
-如果需要云端同步，改用：
-```bash
-export WANDB_API_KEY="..."
-export WANDB_ENTITY="..."
-export WANDB_MODE=online  # 或者不设置，默认 online
-```
+For cloud sync, set `WANDB_API_KEY` and `WANDB_ENTITY` instead and remove the `WANDB_MODE=offline` line.

@@ -210,6 +210,42 @@ export DISCOVER_PUCT_C=${DISCOVER_PUCT_C:-1.0}
 export DISCOVER_TOPK_CHILDREN=${DISCOVER_TOPK_CHILDREN:-2}
 export DISCOVER_MAX_BUFFER_SIZE=${DISCOVER_MAX_BUFFER_SIZE:-1000}
 
+########################### Config Snapshot ###########################
+CONFIG_DIR="checkpoints/ttt-discover/${EXPERIMENT_NAME}"
+mkdir -p "$CONFIG_DIR"
+cat > "$CONFIG_DIR/config_snapshot.json" <<SNAPSHOT_EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "git_hash": "$(git rev-parse HEAD 2>/dev/null || echo unknown)",
+  "git_dirty": $(git diff --quiet 2>/dev/null && echo false || echo true),
+  "task": "${TASK}",
+  "experiment_name": "${EXPERIMENT_NAME}",
+  "model_path": "${MODEL_PATH:-}",
+  "total_epochs": "${TOTAL_EPOCHS:-1}",
+  "rollout_n": "${ROLLOUT_N:-64}",
+  "train_batch_size": "${TRAIN_BATCH_SIZE}",
+  "lora_rank": "${LORA_RANK}",
+  "actor_lr": "${ACTOR_LR}",
+  "kl_coef": "${KL_COEF}",
+  "sp_size": "${SP_SIZE:-1}",
+  "rollout_tp": "${ROLLOUT_TP:-4}",
+  "rollout_gpu_mem_util": "${ROLLOUT_GPU_MEM_UTIL:-0.5}",
+  "ngpus_per_node": "${NGPUS_PER_NODE:-8}",
+  "nnodes": "${NNODES:-1}",
+  "gpu_eval_server": "${GPU_EVAL_SERVER:-}",
+  "discover_env_module": "${DISCOVER_ENV_MODULE}",
+  "discover_env_class": "${DISCOVER_ENV_CLASS}",
+  "discover_problem_type": "${DISCOVER_PROBLEM_TYPE}",
+  "discover_phase1_max_tokens": "${DISCOVER_PHASE1_MAX_TOKENS}",
+  "discover_eval_timeout": "${DISCOVER_EVAL_TIMEOUT}",
+  "discover_max_model_len": "${DISCOVER_MAX_MODEL_LEN}",
+  "discover_puct_c": "${DISCOVER_PUCT_C}",
+  "discover_topk_children": "${DISCOVER_TOPK_CHILDREN}",
+  "discover_max_buffer_size": "${DISCOVER_MAX_BUFFER_SIZE}"
+}
+SNAPSHOT_EOF
+echo "Config snapshot saved to $CONFIG_DIR/config_snapshot.json"
+
 ########################### Launch ###########################
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=entropic_adaptive_beta \
@@ -266,7 +302,7 @@ python3 -m verl.trainer.main_ppo \
     reward.custom_reward_function.name=compute_score \
     \
     trainer.balance_batch=True \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console","wandb","file"]' \
     trainer.project_name=ttt-discover \
     trainer.experiment_name=${EXPERIMENT_NAME} \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
