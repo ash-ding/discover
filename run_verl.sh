@@ -250,6 +250,7 @@ echo "Config snapshot saved to $CONFIG_DIR/config_snapshot.json"
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=entropic_adaptive_beta \
     algorithm.use_kl_in_reward=False \
+    algorithm.kl_ctrl.kl_coef=${KL_COEF} \
     \
     data.train_files="${PWD}/${DATA_FILE}" \
     data.val_files="${PWD}/${DATA_FILE}" \
@@ -269,7 +270,7 @@ python3 -m verl.trainer.main_ppo \
     \
     actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
     "actor_rollout_ref.actor.optim.betas=[0.9,0.95]" \
-    actor_rollout_ref.actor.grad_clip=1.0 \
+    actor_rollout_ref.actor.grad_clip=1e9 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
     actor_rollout_ref.actor.clip_ratio=1000.0 \
     actor_rollout_ref.actor.clip_ratio_low=1000.0 \

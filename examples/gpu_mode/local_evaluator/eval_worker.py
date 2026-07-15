@@ -102,10 +102,12 @@ def run_evaluation(submission_code, task_name, gpu_type, timeout=530, task_def=N
     from libkernelbot.consts import SubmissionMode
     from libkernelbot.run_eval import run_config
 
+    import copy
+
     if task_def is None:
         task_def = load_task_definition(task_name)
 
-    task = task_def.task
+    task = copy.copy(task_def.task)
 
     # Cap inner timeouts to prevent orphan grandchild processes
     max_phase_timeout = max(timeout // 3, 60)

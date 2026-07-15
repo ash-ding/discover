@@ -522,8 +522,9 @@ class PooledKernelEvaluator:
     container running per GPU. Communication via stdin/stdout JSON lines.
     Eliminates ~4s container lifecycle overhead per eval.
 
-    Falls back to LocalKernelEvaluator behavior for GPU crash recovery:
-    kills and restarts the container on catastrophic failure.
+    Health-aware with async recovery: GPU crashes trigger background recovery
+    while requests fast-fail immediately. States: HEALTHY → RECOVERING → HEALTHY
+    (or FAILED after 5 consecutive failures).
     """
 
     def __init__(
@@ -543,10 +544,32 @@ class PooledKernelEvaluator:
         self._container_proc: Optional[subprocess.Popen] = None
         self._container_name = f"eval_pool_gpu_{gpu_id}"
 
+        self._state = "HEALTHY"
+        self._state_lock = threading.Lock()
+        self._healthy_event = threading.Event()
+        self._healthy_event.set()
+        self._recovery_thread: Optional[threading.Thread] = None
+        self._recovery_start_time: float = 0
+        self._consecutive_failures: int = 0
+        self._queue_depth: int = 0
+        self._queue_depth_lock = threading.Lock()
+
         self._setup_podman_storage()
         self.container_runtime = self._detect_runtime(container_runtime)
         self._verify_gpu()
         self._start_container()
+
+    @property
+    def healthy(self) -> bool:
+        return self._state == "HEALTHY"
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue_depth
 
     def _setup_podman_storage(self):
         project_root = Path(__file__).parent.parent.parent.parent
@@ -659,70 +682,81 @@ class PooledKernelEvaluator:
         task_name: str = "trimul",
         gpu_type: str = "H100",
     ) -> Dict[str, Any]:
-        with self.lock:
-            return self._evaluate_locked(submission_code, task_name, gpu_type)
+        with self._queue_depth_lock:
+            self._queue_depth += 1
+
+        try:
+            while True:
+                self._healthy_event.wait()
+
+                if self._state == "FAILED":
+                    return self._make_failure_result(
+                        f"GPU {self.gpu_id} permanently failed", retriable=True
+                    )
+
+                self.lock.acquire()
+                try:
+                    if self._state == "HEALTHY":
+                        result = self._evaluate_locked(submission_code, task_name, gpu_type)
+                        if result is not None:
+                            return result
+                        logger.info(f"GPU {self.gpu_id}: infra failure, waiting for recovery to retry")
+                finally:
+                    self.lock.release()
+        finally:
+            with self._queue_depth_lock:
+                self._queue_depth -= 1
 
     def _evaluate_locked(
         self,
         submission_code: str,
         task_name: str,
         gpu_type: str,
-    ) -> Dict[str, Any]:
-        for attempt in range(1 + self.max_retries):
-            if self._container_proc is None or self._container_proc.poll() is not None:
-                logger.warning(f"Container for GPU {self.gpu_id} is dead, restarting...")
-                try:
-                    self._restart_container()
-                except Exception as e:
-                    return self._make_failure_result(f"Container restart failed: {e}")
+    ) -> Optional[Dict[str, Any]]:
+        """Run one eval attempt. Returns result dict, or None for infra
+        failures (kernel was never evaluated — caller should retry after
+        recovery)."""
+        if self._container_proc is None or self._container_proc.poll() is not None:
+            self._trigger_recovery("container_dead")
+            return None
 
-            request = json.dumps({
-                "code": submission_code,
-                "task_name": task_name,
-                "gpu_type": gpu_type,
-                "timeout": self.timeout,
-            })
+        request = json.dumps({
+            "code": submission_code,
+            "task_name": task_name,
+            "gpu_type": gpu_type,
+            "timeout": self.timeout,
+        })
 
-            try:
-                self._container_proc.stdin.write(request + "\n")
-                self._container_proc.stdin.flush()
-            except (BrokenPipeError, OSError) as e:
-                logger.warning(f"Broken pipe writing to GPU {self.gpu_id} container: {e}")
-                if attempt < self.max_retries:
-                    self._restart_container()
-                    continue
-                return self._make_failure_result(f"Container pipe broken: {e}")
+        try:
+            self._container_proc.stdin.write(request + "\n")
+            self._container_proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            self._trigger_recovery("broken_pipe")
+            return None
 
-            response_line = self._readline_with_timeout(timeout=self.timeout + 60)
-            if response_line is None:
-                logger.warning(f"Timeout/EOF reading from GPU {self.gpu_id} container")
-                if attempt < self.max_retries:
-                    self._restart_container()
-                    continue
-                return self._make_failure_result(f"Container response timeout after {self.timeout}s")
+        response_line = self._readline_with_timeout(timeout=self.timeout + 60)
+        if response_line is None:
+            self._trigger_recovery("response_timeout")
+            return self._make_failure_result(
+                f"GPU {self.gpu_id} response timeout"
+            )
 
-            try:
-                result = json.loads(response_line)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON from GPU {self.gpu_id} container: {e}")
-                if attempt < self.max_retries:
-                    self._restart_container()
-                    continue
-                return self._make_failure_result(f"Invalid container response: {e}")
+        try:
+            result = json.loads(response_line)
+        except json.JSONDecodeError:
+            self._trigger_recovery("invalid_json")
+            return None
 
-            if self._is_gpu_crash(result):
-                logger.warning(f"GPU crash on GPU {self.gpu_id}, attempt {attempt + 1}/{1 + self.max_retries}")
-                if attempt < self.max_retries:
-                    self._restart_container()
-                    time.sleep(2)
-                    continue
-                return self._make_failure_result("GPU crash, recovery failed")
+        if self._is_gpu_crash(result):
+            self._trigger_recovery("gpu_crash")
+            return self._make_failure_result(
+                f"GPU {self.gpu_id} crash detected"
+            )
 
-            result.setdefault("stdout", "")
-            result.setdefault("stderr", "")
-            return result
-
-        return self._make_failure_result("Max retries exceeded")
+        self._consecutive_failures = 0
+        result.setdefault("stdout", "")
+        result.setdefault("stderr", "")
+        return result
 
     def _is_gpu_crash(self, result: Dict[str, Any]) -> bool:
         if result.get("gpu_crash"):
@@ -733,6 +767,80 @@ class PooledKernelEvaluator:
             "cudaGetLastError", "Segmentation fault", "CUDA_ERROR",
         ]
         return any(kw in error for kw in gpu_error_keywords)
+
+    def _trigger_recovery(self, reason: str):
+        """Set state to RECOVERING and spawn background recovery thread."""
+        with self._state_lock:
+            if self._state == "RECOVERING":
+                logger.debug(f"GPU {self.gpu_id}: recovery already in progress (reason={reason})")
+                return
+            self._state = "RECOVERING"
+            self._healthy_event.clear()
+            self._recovery_start_time = time.monotonic()
+            self._consecutive_failures += 1
+            logger.warning(
+                f"GPU {self.gpu_id}: RECOVERING (reason={reason}, "
+                f"consecutive_failures={self._consecutive_failures})"
+            )
+
+        self._recovery_thread = threading.Thread(
+            target=self._background_recovery,
+            name=f"gpu-{self.gpu_id}-recovery",
+            daemon=True,
+        )
+        self._recovery_thread.start()
+
+    def _background_recovery(self):
+        """Background thread: kill container, recover GPU, restart container."""
+        try:
+            logger.info(f"GPU {self.gpu_id}: background recovery starting...")
+
+            with self.lock:
+                if self._container_proc is not None:
+                    try:
+                        self._container_proc.kill()
+                        self._container_proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                    self._container_proc = None
+
+            self._cleanup_stale_container()
+            self._recover_gpu()
+
+            with self.lock:
+                self._start_container()
+
+            elapsed = time.monotonic() - self._recovery_start_time
+            with self._state_lock:
+                self._state = "HEALTHY"
+                self._consecutive_failures = 0
+            self._healthy_event.set()
+            logger.info(f"GPU {self.gpu_id}: recovery complete in {elapsed:.1f}s")
+
+        except Exception as e:
+            elapsed = time.monotonic() - self._recovery_start_time
+            logger.error(f"GPU {self.gpu_id}: recovery FAILED after {elapsed:.1f}s: {e}")
+            with self._state_lock:
+                if self._consecutive_failures >= 5:
+                    self._state = "FAILED"
+                    self._healthy_event.set()
+                    logger.error(f"GPU {self.gpu_id}: too many consecutive failures, state=FAILED")
+                else:
+                    backoff = min(30 * self._consecutive_failures, 120)
+                    logger.info(f"GPU {self.gpu_id}: scheduling recovery retry in {backoff}s")
+                    threading.Thread(
+                        target=self._delayed_recovery_retry,
+                        args=(backoff,),
+                        daemon=True,
+                    ).start()
+
+    def _delayed_recovery_retry(self, delay: float):
+        """Wait, then attempt recovery again."""
+        time.sleep(delay)
+        with self._state_lock:
+            if self._state != "RECOVERING":
+                return
+        self._background_recovery()
 
     def _restart_container(self):
         logger.info(f"Restarting container for GPU {self.gpu_id}...")
@@ -766,16 +874,22 @@ class PooledKernelEvaluator:
         else:
             logger.warning(f"GPU {self.gpu_id} recovery verification failed")
 
-    def _make_failure_result(self, error_msg: str) -> Dict[str, Any]:
-        return {
+    def _make_failure_result(self, error_msg: str, retriable: bool = False) -> Dict[str, Any]:
+        result = {
             "success": False,
             "score_us": self.penalty_score,
             "error": error_msg,
             "stdout": "",
             "stderr": error_msg,
         }
+        if retriable:
+            result["retriable"] = True
+        return result
 
     def shutdown(self):
+        with self._state_lock:
+            self._state = "FAILED"
+
         if self._container_proc is not None:
             try:
                 self._container_proc.stdin.close()
@@ -787,4 +901,8 @@ class PooledKernelEvaluator:
             except Exception:
                 pass
         self._cleanup_stale_container()
+
+        if self._recovery_thread is not None and self._recovery_thread.is_alive():
+            self._recovery_thread.join(timeout=10)
+
         logger.info(f"Pooled container for GPU {self.gpu_id} shut down")
