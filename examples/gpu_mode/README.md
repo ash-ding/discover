@@ -18,16 +18,31 @@ GPU Mode requires a **separate GPU** for kernel evaluation (training uses all 8 
 
 ### Option A: Remote Eval Server (recommended for multi-node)
 
-Run the eval server on a separate node (e.g., Node 0) with dedicated GPUs:
+Run the eval server on Node 1 (10.241.128.16) with 4 dedicated GPUs:
 
 ```bash
-# On eval node (Node 0), start eval server with 2 GPUs
-conda activate verl_discover
-python examples/gpu_mode/eval_server.py --port 8890 --num-gpus 2 --gpu-ids 0,1
+# SSH to Node 1 and start eval server
+ssh 10.241.128.16 bash -l << 'EOF'
+cd /workspace/home/asherding/code/discover
+PYTHONPATH=/workspace/home/asherding/code/discover:$PYTHONPATH \
+nohup /workspace/home/asherding/.conda/envs/verl_discover/bin/python -u \
+  examples/gpu_mode/eval_server.py --port 8890 --num-gpus 4 --timeout 530 \
+  > /tmp/eval_server.log 2>&1 </dev/null &
+EOF
+
+# Verify health (wait ~10s for startup)
+curl http://10.241.128.16:8890/health
 
 # On training node, set the server address
-export GPU_EVAL_SERVER=http://10.241.128.30:8890
+export GPU_EVAL_SERVER=http://10.241.128.16:8890
 ```
+
+**Important gotchas when starting the eval server via SSH:**
+
+1. **Working directory**: Must `cd` to the project root (`/workspace/home/asherding/code/discover`) before running the script, because it imports `examples.gpu_mode.local_evaluator` as a Python package.
+2. **PYTHONPATH**: Must include the project root so Python can resolve `examples.gpu_mode.*` imports. The conda environment alone is not enough.
+3. **Use absolute python path**: `conda activate` in non-interactive SSH doesn't always work. Use the full path `/workspace/home/asherding/.conda/envs/verl_discover/bin/python`.
+4. **Restart before each experiment**: Always restart the eval server before launching a new training run. This prevents log contamination between experiments (`/tmp/eval_server.log` accumulates across runs).
 
 ### Option B: Local Eval (single-node, uses training GPUs)
 
