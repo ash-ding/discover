@@ -447,13 +447,13 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 if eval_server and has_triton:
                     import urllib.request
                     task_name = self._discover_config.get("problem_type", "trimul")
-                    eval_timeout = self._discover_config.get("eval_timeout", 530) + 60
+                    eval_timeout = self._discover_config.get("eval_http_timeout", 3600)
                     score_scale = self._discover_config.get("score_scale", 1500)
                     payload = json.dumps({"code": code, "task_name": task_name, "gpu_type": "H100"}).encode()
                     eval_url = eval_server.rstrip("/")
                     if not eval_url.startswith("http"):
                         eval_url = f"http://{eval_url}"
-                    max_retries = 2
+                    max_retries = 1
                     for attempt in range(1 + max_retries):
                         try:
                             req = urllib.request.Request(f"{eval_url}/", data=payload,

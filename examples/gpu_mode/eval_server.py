@@ -1,20 +1,18 @@
-"""HTTP GPU kernel eval server. Runs independently on the eval node (Node 0).
+"""HTTP GPU kernel eval server with shared task pool.
 
 Usage:
-    python examples/gpu_mode/eval_server.py --port 8890 --num-gpus 2
+    python examples/gpu_mode/eval_server.py --port 8890 --num-gpus 4
 
-The server accepts POST requests with JSON body {"code": "...", "task_name": "trimul", "gpu_type": "H100"}
-and returns the evaluation result.
-
-Health-aware routing: requests are routed only to healthy GPUs with the lowest
-queue depth. Unhealthy GPUs fast-fail immediately; recovery runs in the background.
+Requests go into a shared queue. Per-GPU workers pull tasks when idle.
+On GPU failure, tasks are re-queued for other GPUs automatically.
 """
 
 import argparse
-import itertools
+import concurrent.futures
 import json
-import time
+import queue
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 
@@ -22,37 +20,109 @@ from examples.gpu_mode.local_evaluator import LocalKernelEvaluator
 from examples.gpu_mode.local_evaluator.evaluator import PooledKernelEvaluator
 
 
+class SharedEvalPool:
+    """Shared task pool: HTTP handlers submit work, per-GPU workers pull and evaluate.
+
+    On infra failure (container crash, GPU error), the task is re-queued for
+    another GPU — no request is permanently bound to a failing GPU.
+    """
+
+    def __init__(self, evaluators, request_timeout=3600):
+        self.evaluators = evaluators
+        self.request_timeout = request_timeout
+        self._queue = queue.Queue()
+        self._worker_busy = {ev.gpu_id: False for ev in evaluators}
+        self._busy_lock = threading.Lock()
+        for ev in evaluators:
+            t = threading.Thread(target=self._worker, args=(ev,), daemon=True,
+                                 name=f"pool-gpu-{ev.gpu_id}")
+            t.start()
+
+    def submit(self, code, task_name, gpu_type):
+        future = concurrent.futures.Future()
+        self._queue.put((code, task_name, gpu_type, future))
+        try:
+            return future.result(timeout=self.request_timeout)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return {"success": False, "score_us": -1_000_000,
+                    "error": f"Pool timeout ({self.request_timeout}s)"}
+        except concurrent.futures.CancelledError:
+            return {"success": False, "score_us": -1_000_000,
+                    "error": "Request cancelled"}
+
+    def _worker(self, evaluator):
+        import sys, datetime
+        gpu_id = evaluator.gpu_id
+        while True:
+            if not evaluator.healthy:
+                evaluator._healthy_event.wait(timeout=5)
+                if evaluator.state == "FAILED":
+                    time.sleep(30)
+                continue
+
+            try:
+                item = self._queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            code, task_name, gpu_type, future = item
+
+            if future.cancelled() or future.done():
+                continue
+
+            evaluator.lock.acquire()
+            try:
+                with self._busy_lock:
+                    self._worker_busy[gpu_id] = True
+
+                if not evaluator.healthy:
+                    self._queue.put(item)
+                    continue
+
+                print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: evaluating "
+                      f"task={task_name} code_len={len(code)}", file=sys.stderr, flush=True)
+                result = evaluator._evaluate_locked(code, task_name, gpu_type)
+            finally:
+                with self._busy_lock:
+                    self._worker_busy[gpu_id] = False
+                evaluator.lock.release()
+
+            if result is None:
+                print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: infra failure "
+                      f"(kernel never evaluated), re-queuing task",
+                      file=sys.stderr, flush=True)
+                if not future.cancelled():
+                    self._queue.put((code, task_name, gpu_type, future))
+                continue
+
+            if not future.cancelled() and not future.done():
+                future.set_result(result)
+                if result.get("success"):
+                    print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: success, "
+                          f"score_us={result.get('score_us')}", file=sys.stderr, flush=True)
+                else:
+                    err = str(result.get("error", ""))[:200].replace("\n", " ")
+                    print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: eval error: {err}",
+                          file=sys.stderr, flush=True)
+
+    @property
+    def queue_depth(self):
+        return self._queue.qsize()
+
+    def gpu_status(self):
+        with self._busy_lock:
+            busy = dict(self._worker_busy)
+        return [{
+            "gpu_id": ev.gpu_id,
+            "state": ev.state,
+            "busy": busy.get(ev.gpu_id, False),
+        } for ev in self.evaluators]
+
+
 class EvalHandler(BaseHTTPRequestHandler):
     evaluators = []
-    counter = itertools.count()
-    lock = threading.Lock()
-    request_timeout = 600
-
-    def _select_evaluator(self, exclude=None):
-        """Select an evaluator with the lowest queue depth.
-
-        Prefers healthy GPUs. Falls back to recovering GPUs (the request
-        will wait inside evaluate() until recovery completes). Returns None
-        only when all GPUs are permanently FAILED.
-
-        Args:
-            exclude: set of gpu_ids to skip (already tried and permanently failed).
-        """
-        exclude = exclude or set()
-        available = [ev for ev in self.evaluators
-                     if ev.gpu_id not in exclude and ev.state != "FAILED"]
-        if not available:
-            return None
-
-        healthy = [ev for ev in available if ev.healthy]
-        candidates = healthy if healthy else available
-
-        candidates.sort(key=lambda ev: ev.queue_depth)
-        min_depth = candidates[0].queue_depth
-        tied = [ev for ev in candidates if ev.queue_depth == min_depth]
-        with self.lock:
-            idx = next(self.counter) % len(tied)
-        return tied[idx]
+    pool = None
 
     def do_POST(self):
         import sys, datetime, traceback
@@ -66,48 +136,12 @@ class EvalHandler(BaseHTTPRequestHandler):
             task_name = body.get("task_name", "trimul")
             gpu_type = body.get("gpu_type", "H100")
 
-            max_eval_retries = min(3, len(self.evaluators))
-            tried_gpus = set()
-            result = None
+            print(f"[{datetime.datetime.now()}] POST: task={task_name} code_len={len(code)} "
+                  f"pool_depth={self.pool.queue_depth}", file=sys.stderr, flush=True)
 
-            for attempt in range(max_eval_retries):
-                evaluator = self._select_evaluator(exclude=tried_gpus)
-                if evaluator is None:
-                    break
-                tried_gpus.add(evaluator.gpu_id)
+            result = self.pool.submit(code, task_name, gpu_type)
 
-                print(f"[{datetime.datetime.now()}] POST: gpu={evaluator.gpu_id} task={task_name} "
-                      f"code_len={len(code)} attempt={attempt}", file=sys.stderr, flush=True)
-
-                result = evaluator.evaluate(code, task_name, gpu_type)
-
-                if result.get("retriable"):
-                    print(f"[{datetime.datetime.now()}] POST: GPU {evaluator.gpu_id} permanently failed, "
-                          f"trying next GPU", file=sys.stderr, flush=True)
-                    continue
-
-                if result.get("success"):
-                    print(f"[{datetime.datetime.now()}] POST: success, score_us={result.get('score_us')}",
-                          file=sys.stderr, flush=True)
-                else:
-                    err_preview = str(result.get("error", ""))[:200].replace("\n", " ")
-                    print(f"[{datetime.datetime.now()}] POST: eval error: {err_preview}",
-                          file=sys.stderr, flush=True)
-                break
-
-            if result is None:
-                gpu_states = [{"gpu_id": ev.gpu_id, "state": ev.state}
-                              for ev in self.evaluators]
-                result = {
-                    "success": False, "score_us": -1_000_000,
-                    "error": "All eval GPUs permanently failed",
-                    "gpu_states": gpu_states,
-                    "stdout": "", "stderr": "",
-                }
-                self.send_response(503)
-            else:
-                self.send_response(200)
-
+            self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
@@ -120,27 +154,15 @@ class EvalHandler(BaseHTTPRequestHandler):
                 pass
 
     def do_GET(self):
-        gpu_info = []
-        healthy_count = 0
-        for ev in self.evaluators:
-            info = {
-                "gpu_id": ev.gpu_id,
-                "state": ev.state,
-                "queue_depth": ev.queue_depth,
-            }
-            if ev.state == "RECOVERING" and hasattr(ev, "_recovery_start_time"):
-                info["recovery_elapsed_s"] = round(
-                    time.monotonic() - ev._recovery_start_time, 1
-                )
-            gpu_info.append(info)
-            if ev.healthy:
-                healthy_count += 1
+        gpu_details = self.pool.gpu_status()
+        healthy_count = sum(1 for g in gpu_details if g["state"] == "HEALTHY")
 
         response = {
             "status": "ok" if healthy_count > 0 else "degraded",
             "gpus": len(self.evaluators),
             "healthy_gpus": healthy_count,
-            "gpu_details": gpu_info,
+            "pool_queue_depth": self.pool.queue_depth,
+            "gpu_details": gpu_details,
         }
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -204,7 +226,9 @@ def main():
         print(f"  GPU {gid} ready")
 
     EvalHandler.evaluators = evaluators
-    EvalHandler.request_timeout = args.timeout + 60
+    request_timeout = args.timeout * 6 + 300
+    pool = SharedEvalPool(evaluators, request_timeout=request_timeout)
+    EvalHandler.pool = pool
 
     import atexit
     def _shutdown_evaluators():
@@ -220,7 +244,7 @@ def main():
     server = ThreadedHTTPServer(("0.0.0.0", args.port), EvalHandler, max_workers=http_workers)
     mode = "pooled" if use_pooling else ("container" if args.use_container else "subprocess")
     print(f"Eval server listening on 0.0.0.0:{args.port} with {len(evaluators)} GPUs {gpu_ids} ({mode} mode)")
-    print(f"HTTP workers: {http_workers}, Eval GPUs: {len(evaluators)}, Request timeout: {EvalHandler.request_timeout}s")
+    print(f"HTTP workers: {http_workers}, Eval GPUs: {len(evaluators)}, Pool timeout: {request_timeout}s")
     server.serve_forever()
 
 
