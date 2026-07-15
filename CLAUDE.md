@@ -91,6 +91,8 @@ export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
 
 2. **Never use conda `base` environment** to run or debug code.
 
+3. **Always commit code changes after modifying the codebase.** This ensures all changes are tracked and reviewable via git history.
+
 ## Standard Workflow
 
 ```bash

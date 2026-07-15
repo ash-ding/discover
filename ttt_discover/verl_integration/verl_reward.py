@@ -52,12 +52,9 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
             evaluator = _evaluator_cache[cache_key]
 
         result = evaluator.get_reward(solution_str, state=extra.get("state"))
-        # Persist eval error message for downstream logging
-        if extra is not None:
-            extra["_eval_msg"] = result.get("msg", "")
-        return float(result.get("reward", 0.0))
+        reward = float(result.get("reward", 0.0))
+        msg = result.get("msg", "")
+        return {"score": reward, "eval_msg": msg}
     except Exception as e:
         logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
-        if extra is not None:
-            extra["_eval_msg"] = f"{type(e).__name__}: {e}"
-        return 0.0
+        return {"score": 0.0, "eval_msg": f"{type(e).__name__}: {e}"}
