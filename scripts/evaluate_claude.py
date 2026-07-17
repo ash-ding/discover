@@ -176,7 +176,8 @@ def main():
 
     step = os.getenv("STEP", "1")
     timeout = int(os.getenv("EVAL_TIMEOUT", "120"))
-    max_workers = int(os.getenv("EVAL_WORKERS", "32"))
+    default_workers = "256" if task == "gpu_mode" else "32"
+    max_workers = int(os.getenv("EVAL_WORKERS", default_workers))
 
     input_file = Path(f"checkpoints/claude_{task}_step{step}.jsonl")
     output_file = Path(f"checkpoints/claude_{task}_step{step}_scored.jsonl")
