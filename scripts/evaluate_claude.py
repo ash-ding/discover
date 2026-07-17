@@ -100,59 +100,55 @@ def evaluate_erdos_worker(idx, code, timeout, result_queue):
         result_queue.put((idx, 0.0, f"error:{type(e).__name__}"))
 
 
-def evaluate_gpu_mode_worker(idx, code, timeout, result_queue):
-    """Evaluate GPU Mode (trimul) task via remote eval server.
+ENTRY_FUNCTIONS = {"gpu_mode": "custom_kernel"}
 
-    Sends the raw code (containing custom_kernel) directly to the eval server.
-    The server compiles the kernel, benchmarks it, and returns score_us (microseconds).
-    """
+
+def evaluate_gpu_mode_direct(idx, code, timeout):
+    """Evaluate GPU mode via remote eval server (no subprocess needed)."""
+    eval_server = os.getenv("GPU_EVAL_SERVER")
+    if not eval_server:
+        return idx, 0.0, "no_eval_server"
+
+    import requests
+
+    task_name = os.getenv("GPU_TASK_NAME", "trimul")
     try:
-        eval_server = os.getenv("GPU_EVAL_SERVER")
-        if not eval_server:
-            result_queue.put((idx, 0.0, "no_eval_server"))
-            return
-
-        import requests
-
-        task_name = os.getenv("GPU_TASK_NAME", "trimul")
         response = requests.post(
             eval_server,
             json={"code": code, "task_name": task_name, "gpu_type": "H100"},
             timeout=timeout + 60,
         )
-
         if response.status_code != 200:
-            result_queue.put((idx, 0.0, f"server_error_{response.status_code}"))
-            return
+            return idx, 0.0, f"server_error_{response.status_code}"
 
         result = response.json()
         if result.get("success"):
             score_us = result["score_us"]
-            result_queue.put((idx, float(score_us), f"score_us={score_us:.2f}"))
+            return idx, float(score_us), f"score_us={score_us:.2f}"
         else:
             error = str(result.get("error", "unknown"))[:200]
-            result_queue.put((idx, 0.0, f"eval_fail:{error}"))
+            return idx, 0.0, f"eval_fail:{error}"
 
+    except requests.exceptions.Timeout:
+        return idx, 0.0, "http_timeout"
     except Exception as e:
-        result_queue.put((idx, 0.0, f"error:{type(e).__name__}:{str(e)[:100]}"))
-
-
-ENTRY_FUNCTIONS = {"gpu_mode": "custom_kernel"}
+        return idx, 0.0, f"error:{type(e).__name__}:{str(e)[:100]}"
 
 
 def evaluate_with_timeout(idx, code, timeout, task):
-    """Spawn a process and kill it if it exceeds timeout."""
+    """Evaluate a rollout with timeout. Uses subprocess for CPU tasks, direct HTTP for GPU."""
     entry_func = ENTRY_FUNCTIONS.get(task, "run")
     if not code or f"def {entry_func}" not in code:
         return idx, 0.0, "no_code"
+
+    if task == "gpu_mode":
+        return evaluate_gpu_mode_direct(idx, code, timeout)
 
     q = Queue()
 
     # Select worker based on task
     if task == "erdos":
         worker = evaluate_erdos_worker
-    elif task == "gpu_mode":
-        worker = evaluate_gpu_mode_worker
     else:
         return idx, 0.0, f"unsupported_task_{task}"
 
