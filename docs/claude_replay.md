@@ -125,6 +125,21 @@ Adds evaluation results:
 }
 ```
 
+## System Prompts
+
+The replay script uses task-specific Claude system prompts matching the TTT Advisor
+codebase exactly. These are passed via the `system` parameter in the Claude API call.
+
+| Task | System Prompt Summary |
+|------|----------------------|
+| Erdos | Expert in harmonic analysis and numerical optimization, Erdős min overlap |
+| GPU Mode | Expert Triton kernel engineer, requires @triton.jit |
+| (others) | Generic expert problem solver (fallback) |
+
+The system prompts guide Claude's approach and strategy for each task, while the
+user message contains the full problem description and state context extracted from
+Qwen3 rollouts.
+
 ## Two-Phase Generation
 
 The replay script uses a two-phase approach matching Qwen3's pipeline:

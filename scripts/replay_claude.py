@@ -35,6 +35,32 @@ TEMPERATURE = 1.0
 PHASE1_MAX = 25300
 PHASE2_MAX = 6700
 
+# Task-specific Claude system prompts (matching TTT Advisor codebase exactly)
+SYSTEM_PROMPTS = {
+    "erdos": (
+        "You are an expert in harmonic analysis and numerical optimization, "
+        "solving the Erdős minimum overlap problem. Find a step function "
+        "h: [0,2] → [0,1] with ∫h=1 that MINIMIZES C₅ = max_k ∫h(x)(1−h(x+k))dx. "
+        "Your code MUST define run(seed, budget_s, **kwargs) returning "
+        "(h_values, c5_bound, n_points). Use numpy and scipy. Strategy: try diverse "
+        "approaches — gradient descent, simulated annealing, genetic algorithms, "
+        "spectral methods, or convex relaxations. Do not get stuck on a single approach. "
+        "Lower C₅ is better; current record is ≤ 0.3809."
+    ),
+    "gpu_mode": (
+        "You are an expert GPU kernel engineer specializing in Triton. "
+        "Your solution MUST include at least one @triton.jit decorated kernel "
+        "function — solutions without @triton.jit will score zero. Strategy: "
+        "use PyTorch for large matmuls (cuBLAS), but fuse elementwise operations "
+        "(LayerNorm, sigmoid, gating, masking, multiply) into Triton kernels "
+        "for maximum throughput."
+    ),
+}
+DEFAULT_SYSTEM_PROMPT = (
+    "You are an expert problem solver. Provide a clear, concise solution to the problem. "
+    "Show your reasoning and give a final answer."
+)
+
 
 def extract_code(text):
     """Extract the last Python code block from text."""
@@ -43,7 +69,7 @@ def extract_code(text):
     return matches[-1].group(1).rstrip() if matches else ""
 
 
-async def call_claude_two_phase(client, user_content, semaphore, idx=""):
+async def call_claude_two_phase(client, user_content, semaphore, system_prompt=None, idx=""):
     """Two-phase Claude generation.
 
     Phase 1: Free generation up to PHASE1_MAX tokens
@@ -58,12 +84,15 @@ async def call_claude_two_phase(client, user_content, semaphore, idx=""):
 
             # Phase 1: free generation
             def _phase1():
-                with client.messages.stream(
+                kwargs = dict(
                     model=MODEL,
                     max_tokens=PHASE1_MAX,
                     temperature=TEMPERATURE,
                     messages=[{"role": "user", "content": user_content}],
-                ) as stream:
+                )
+                if system_prompt:
+                    kwargs["system"] = system_prompt
+                with client.messages.stream(**kwargs) as stream:
                     return stream.get_final_message()
 
             r1 = await asyncio.to_thread(_phase1)
@@ -82,7 +111,7 @@ async def call_claude_two_phase(client, user_content, semaphore, idx=""):
             else:
                 # Phase 2: explicit continuation request
                 def _phase2():
-                    with client.messages.stream(
+                    kwargs = dict(
                         model=MODEL,
                         max_tokens=PHASE2_MAX,
                         temperature=TEMPERATURE,
@@ -94,7 +123,10 @@ async def call_claude_two_phase(client, user_content, semaphore, idx=""):
                                 "with `def run(seed=42, budget_s=1000, **kwargs)` function. "
                                 "No explanation needed, just the code in a ```python block."},
                         ],
-                    ) as stream:
+                    )
+                    if system_prompt:
+                        kwargs["system"] = system_prompt
+                    with client.messages.stream(**kwargs) as stream:
                         return stream.get_final_message()
 
                 r2 = await asyncio.to_thread(_phase2)
@@ -168,9 +200,13 @@ async def main():
 
     prompts = all_prompts[str(step)]
 
+    # Task-specific system prompt (matching TTT Advisor)
+    system_prompt = SYSTEM_PROMPTS.get(task, DEFAULT_SYSTEM_PROMPT)
+
     print(f"=== Claude Replay: {task.upper()} Step {step} ===", flush=True)
     print(f"Model: {MODEL}", flush=True)
     print(f"Temperature: {TEMPERATURE}", flush=True)
+    print(f"System prompt: {system_prompt[:80]}...", flush=True)
     print(f"Phase 1 max: {PHASE1_MAX}, Phase 2 max: {PHASE2_MAX}", flush=True)
     print(f"Prompts: {len(prompts)}, Rollouts/prompt: {n_rollouts}", flush=True)
     print(f"Total calls: {len(prompts) * n_rollouts}", flush=True)
@@ -212,7 +248,7 @@ async def main():
                         continue
 
                     idx = f"p{pi}r{ri}"
-                    tasks.append(call_claude_two_phase(client, user_content, semaphore, idx))
+                    tasks.append(call_claude_two_phase(client, user_content, semaphore, system_prompt, idx))
                     task_ri_values.append(ri)
 
                 if not tasks:
