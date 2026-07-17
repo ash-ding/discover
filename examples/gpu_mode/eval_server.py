@@ -96,14 +96,17 @@ class SharedEvalPool:
                     self._queue.put((code, task_name, gpu_type, future))
                 continue
 
-            if not future.cancelled() and not future.done():
+            try:
                 future.set_result(result)
-                if result.get("success"):
-                    print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: success, "
-                          f"score_us={result.get('score_us')}", file=sys.stderr, flush=True)
-                else:
-                    err = str(result.get("error", ""))[:200].replace("\n", " ")
-                    print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: eval error: {err}",
+            except (concurrent.futures.InvalidStateError, Exception):
+                continue
+
+            if result.get("success"):
+                print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: success, "
+                      f"score_us={result.get('score_us')}", file=sys.stderr, flush=True)
+            else:
+                err = str(result.get("error", ""))[:200].replace("\n", " ")
+                print(f"[{datetime.datetime.now()}] pool-gpu-{gpu_id}: eval error: {err}",
                           file=sys.stderr, flush=True)
 
     @property

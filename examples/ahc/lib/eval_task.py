@@ -17,7 +17,7 @@ from examples.ahc.lib.utils import get_cache_dir
 
 def get_ale_bench_error(msg: str) -> dict[str, Any]:
     return {
-        "score": 0.0,
+        "reward": 0.0,
         "msg": msg,
         "correctness": 0.0,
         "performance": 0.0,

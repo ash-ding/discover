@@ -737,9 +737,7 @@ class PooledKernelEvaluator:
         response_line = self._readline_with_timeout(timeout=self.timeout + 60)
         if response_line is None:
             self._trigger_recovery("response_timeout")
-            return self._make_failure_result(
-                f"GPU {self.gpu_id} response timeout"
-            )
+            return None
 
         try:
             result = json.loads(response_line)

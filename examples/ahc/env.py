@@ -7,11 +7,20 @@ CPUS_PER_TASK = 2
 
 
 class AhcRewardEvaluator(BaseRewardEvaluator):
+    _CPP_PATTERN = __import__('re').compile(r'```(?:cpp|c\+\+)\s*\n(.*?)(?:\n```|$)', __import__('re').DOTALL)
+
     def __init__(self, *args, **kwargs):
         self.problem_type = kwargs.get("problem_type")
         self.log_dir = kwargs.get("log_dir")
 
+    def _extract_cpp_code(self, text: str) -> str:
+        matches = list(self._CPP_PATTERN.finditer(text))
+        if matches:
+            return matches[-1].group(1).rstrip()
+        return text
+
     def get_reward(self, code: str, state: State) -> float:
+        code = self._extract_cpp_code(code)
 
         raw = run_ale_bench_task(
             code,

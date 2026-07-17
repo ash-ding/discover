@@ -265,12 +265,12 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 successful_parents = []
                 failed_parents = []
 
-                for output, code, score in valid_results:
+                for output, code, score, construction in valid_results:
                     if score > 0 and code:
                         from ttt_discover.tinker_utils.state import State
                         new_state = State(
                             timestep=state.timestep + 1,
-                            construction=None,
+                            construction=construction,
                             code=code,
                             value=score,
                         )
@@ -426,6 +426,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         score = 0.0
         eval_error = ""
         raw_score_us = None
+        result_construction = None
         t_eval = time.time()
 
         if code and not validate:
@@ -480,15 +481,22 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     eval_error = "no @triton.jit in code"
                 elif not eval_server:
                     from ttt_discover.verl_integration.verl_reward import compute_score
-                    score = await asyncio.to_thread(
+                    result = await asyncio.to_thread(
                         compute_score,
                         data_source=self._discover_config.get("data_source", "circle_packing"),
                         solution_str=response_text,
                         ground_truth=None,
                         extra_info=extra_info,
                     )
-                    if score == 0.0:
-                        eval_error = extra_info.get("_eval_msg", "")[:500]
+                    if isinstance(result, dict):
+                        score = float(result.get("score", 0.0))
+                        result_construction = result.get("result_construction")
+                        if score == 0.0:
+                            eval_error = result.get("eval_msg", "")[:500]
+                    else:
+                        score = float(result)
+                        if score == 0.0:
+                            eval_error = extra_info.get("_eval_msg", "")[:500]
             except Exception as e:
                 logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
                 score = 0.0
@@ -518,7 +526,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         # Write to TransferQueue
         await self._write_to_tq(output, prompt, session_id, validate)
 
-        return output, code, score
+        return output, code, score, result_construction
 
     async def _write_to_tq(
         self, output: AgentLoopOutput, prompt: dict, session_id: int, validate: bool

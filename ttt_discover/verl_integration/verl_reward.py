@@ -14,14 +14,6 @@ _evaluator_cache = {}
 _evaluator_lock = threading.Lock()
 
 
-def _extract_last_code_block(text: str) -> str:
-    """Extract the last Python code block from model output."""
-    pattern = re.compile(r'```python\n(.*?)(?:\n```)', re.DOTALL)
-    matches = list(pattern.finditer(text))
-    if matches:
-        return matches[-1].group(1).rstrip()
-    return ""
-
 
 def compute_score(data_source, solution_str, ground_truth=None, extra_info=None, **kwargs):
     """Evaluate circle packing solution by running code in sandbox.
@@ -54,7 +46,8 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
         result = evaluator.get_reward(solution_str, state=extra.get("state"))
         reward = float(result.get("reward", 0.0))
         msg = result.get("msg", "")
-        return {"score": reward, "eval_msg": msg}
+        return {"score": reward, "eval_msg": msg,
+                "result_construction": result.get("result_construction")}
     except Exception as e:
         logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
         return {"score": 0.0, "eval_msg": f"{type(e).__name__}: {e}"}

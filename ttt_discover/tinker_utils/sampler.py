@@ -178,7 +178,12 @@ class PUCTSampler(StateSampler):
         if values.size == 0:
             return 1.0
         v = values[mask] if mask is not None else values
-        return float(max(np.max(v) - np.min(v), 1e-6)) if v.size > 0 else 1.0
+        if v.size == 0:
+            return 1.0
+        range_val = float(np.max(v) - np.min(v))
+        if not np.isfinite(range_val):
+            return 1.0
+        return max(range_val, 1e-6)
 
     def _compute_prior(self, values: np.ndarray, scale: float) -> np.ndarray:
         if values.size == 0:
@@ -281,23 +286,26 @@ class PUCTSampler(StateSampler):
             return
         assert len(states) == len(parent_states)
 
-        # Update PUCT stats for ALL states
+        # Update PUCT stats for ALL states (count per-rollout, not per-unique-parent)
         parent_max: dict[str, float] = {}
         parent_obj: dict[str, State] = {}
+        parent_count: dict[str, int] = {}
         for child, parent in zip(states, parent_states):
             if child.value is None:
                 continue
             pid = parent.id
             parent_obj[pid] = parent
+            parent_count[pid] = parent_count.get(pid, 0) + 1
             parent_max[pid] = max(parent_max.get(pid, float("-inf")), float(child.value))
 
         for pid, y in parent_max.items():
             self._m[pid] = max(self._m.get(pid, y), y)
             parent = parent_obj[pid]
+            count = parent_count.get(pid, 1)
             anc_ids = [pid] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
             for aid in anc_ids:
-                self._n[aid] = self._n.get(aid, 0) + 1
-            self._T += 1
+                self._n[aid] = self._n.get(aid, 0) + count
+            self._T += count
 
         if not states:
             return
