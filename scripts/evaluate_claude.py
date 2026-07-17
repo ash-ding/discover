@@ -116,7 +116,7 @@ def evaluate_gpu_mode_direct(idx, code, timeout):
         response = requests.post(
             eval_server,
             json={"code": code, "task_name": task_name, "gpu_type": "H100"},
-            timeout=timeout + 60,
+            timeout=3600,
         )
         if response.status_code != 200:
             return idx, 0.0, f"server_error_{response.status_code}"
