@@ -69,7 +69,27 @@ def extract_code(text):
     return matches[-1].group(1).rstrip() if matches else ""
 
 
-async def call_claude_two_phase(client, user_content, semaphore, system_prompt=None, idx=""):
+ENTRY_FUNCTIONS = {
+    "gpu_mode": "custom_kernel",
+}
+DEFAULT_ENTRY_FUNCTION = "run"
+
+PHASE2_MESSAGES = {
+    "gpu_mode": (
+        "Your response was cut off. Please provide ONLY the complete Python code "
+        "with the `custom_kernel(data)` function. "
+        "No explanation needed, just the code in a ```python block."
+    ),
+}
+DEFAULT_PHASE2_MESSAGE = (
+    "Your response was cut off. Please provide ONLY the complete Python code "
+    "with `def run(seed=42, budget_s=1000, **kwargs)` function. "
+    "No explanation needed, just the code in a ```python block."
+)
+
+
+async def call_claude_two_phase(client, user_content, semaphore, system_prompt=None,
+                                entry_func="run", phase2_msg=None, idx=""):
     """Two-phase Claude generation.
 
     Phase 1: Free generation up to PHASE1_MAX tokens
@@ -78,6 +98,9 @@ async def call_claude_two_phase(client, user_content, semaphore, system_prompt=N
     Returns:
         dict with output, code, and metadata
     """
+    if phase2_msg is None:
+        phase2_msg = DEFAULT_PHASE2_MESSAGE
+
     async with semaphore:
         try:
             t0 = time.time()
@@ -101,7 +124,7 @@ async def call_claude_two_phase(client, user_content, semaphore, system_prompt=N
             hit_limit = r1.stop_reason == "max_tokens"
 
             code = extract_code(p1_text)
-            has_complete_code = "def run" in code
+            has_complete_code = f"def {entry_func}" in code
 
             phase2_done = False
             p2_tokens = 0
@@ -118,10 +141,7 @@ async def call_claude_two_phase(client, user_content, semaphore, system_prompt=N
                         messages=[
                             {"role": "user", "content": user_content},
                             {"role": "assistant", "content": p1_text},
-                            {"role": "user", "content":
-                                "Your response was cut off. Please provide ONLY the complete Python code "
-                                "with `def run(seed=42, budget_s=1000, **kwargs)` function. "
-                                "No explanation needed, just the code in a ```python block."},
+                            {"role": "user", "content": phase2_msg},
                         ],
                     )
                     if system_prompt:
@@ -145,7 +165,7 @@ async def call_claude_two_phase(client, user_content, semaphore, system_prompt=N
                 "p2_tokens": p2_tokens,
                 "phase2": phase2_done,
                 "p1_stop": r1.stop_reason,
-                "has_run": "def run" in code,
+                "has_entry": f"def {entry_func}" in code,
                 "time": round(elapsed, 1),
                 "output_len": len(final_text),
                 "code_len": len(code),
@@ -159,7 +179,7 @@ async def call_claude_two_phase(client, user_content, semaphore, system_prompt=N
                 "p2_tokens": 0,
                 "phase2": False,
                 "p1_stop": "error",
-                "has_run": False,
+                "has_entry": False,
                 "time": 0,
                 "error": str(e),
                 "output_len": 0,
@@ -200,13 +220,16 @@ async def main():
 
     prompts = all_prompts[str(step)]
 
-    # Task-specific system prompt (matching TTT Advisor)
+    # Task-specific configuration (matching TTT Advisor)
     system_prompt = SYSTEM_PROMPTS.get(task, DEFAULT_SYSTEM_PROMPT)
+    entry_func = ENTRY_FUNCTIONS.get(task, DEFAULT_ENTRY_FUNCTION)
+    phase2_msg = PHASE2_MESSAGES.get(task, DEFAULT_PHASE2_MESSAGE)
 
     print(f"=== Claude Replay: {task.upper()} Step {step} ===", flush=True)
     print(f"Model: {MODEL}", flush=True)
     print(f"Temperature: {TEMPERATURE}", flush=True)
     print(f"System prompt: {system_prompt[:80]}...", flush=True)
+    print(f"Entry function: {entry_func}", flush=True)
     print(f"Phase 1 max: {PHASE1_MAX}, Phase 2 max: {PHASE2_MAX}", flush=True)
     print(f"Prompts: {len(prompts)}, Rollouts/prompt: {n_rollouts}", flush=True)
     print(f"Total calls: {len(prompts) * n_rollouts}", flush=True)
@@ -248,7 +271,9 @@ async def main():
                         continue
 
                     idx = f"p{pi}r{ri}"
-                    tasks.append(call_claude_two_phase(client, user_content, semaphore, system_prompt, idx))
+                    tasks.append(call_claude_two_phase(
+                        client, user_content, semaphore, system_prompt,
+                        entry_func, phase2_msg, idx))
                     task_ri_values.append(ri)
 
                 if not tasks:
@@ -260,7 +285,7 @@ async def main():
                     if isinstance(result, Exception):
                         result = {
                             "error": str(result),
-                            "has_run": False,
+                            "has_entry": False,
                             "code": "",
                             "output": "",
                             "time": 0,
@@ -290,14 +315,14 @@ async def main():
         for line in f:
             results.append(json.loads(line))
 
-    has_run_count = sum(1 for r in results if r.get("has_run"))
+    has_entry_count = sum(1 for r in results if r.get("has_entry"))
     phase2_count = sum(1 for r in results if r.get("phase2"))
     errors = sum(1 for r in results if "error" in r)
     avg_time = sum(r.get("time", 0) for r in results) / len(results) if results else 0
     avg_p1 = sum(r.get("p1_tokens", 0) for r in results) / len(results) if results else 0
 
     print(f"Total: {len(results)}", flush=True)
-    print(f"Has def run(): {has_run_count}/{len(results)} ({100*has_run_count/len(results):.1f}%)", flush=True)
+    print(f"Has {entry_func}(): {has_entry_count}/{len(results)} ({100*has_entry_count/len(results):.1f}%)", flush=True)
     print(f"Needed Phase 2: {phase2_count}/{len(results)}", flush=True)
     print(f"Errors: {errors}", flush=True)
     print(f"Avg time: {avg_time:.0f}s", flush=True)
