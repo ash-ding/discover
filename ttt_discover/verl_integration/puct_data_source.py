@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
+import structlog
 import torch
 from transformers import AutoTokenizer
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class PUCTDataSource:
@@ -96,6 +97,9 @@ class PUCTDataSource:
         )
 
         self._step = resume_step or 0
+        logger.info("puct_data_source_init", env_module=env_module, env_class=env_class,
+                     problem_type=problem_type, groups_per_batch=groups_per_batch,
+                     group_size=group_size, resume_step=resume_step)
 
     def get_batch(self) -> dict[str, Any]:
         """Generate a batch of prompts from PUCT-sampled states.
@@ -107,6 +111,7 @@ class PUCTDataSource:
             meta: list[dict] with per-prompt metadata
         """
         states = self.sampler.sample_states(self.groups_per_batch)
+        logger.debug("get_batch_sampled", num_states=len(states))
 
         prompts = []
         meta = []
@@ -134,6 +139,8 @@ class PUCTDataSource:
         )
 
         prompt_lengths = tokenized["attention_mask"].sum(dim=-1)
+        logger.info("get_batch_complete", num_prompts=len(prompts),
+                     prompt_lengths=prompt_lengths.tolist())
 
         return {
             "input_ids": tokenized["input_ids"],
@@ -158,17 +165,18 @@ class PUCTDataSource:
         parent_states: list,
         step: Optional[int] = None,
     ):
-        """Update PUCT sampler with new states after reward computation."""
         if step is not None:
             self._step = step
+        logger.debug("update_puct", new_states=len(new_states),
+                      parent_states=len(parent_states), step=self._step)
         self.sampler.update_states(
             new_states, parent_states, save=True, step=self._step
         )
 
     def save(self, step: int):
-        """Save sampler state to disk."""
         self.sampler.flush(step=step)
         self._step = step
+        logger.info("puct_state_saved", step=step)
 
     def get_step(self) -> int:
         return self._step

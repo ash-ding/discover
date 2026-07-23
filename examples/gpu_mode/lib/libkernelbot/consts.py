@@ -2,6 +2,10 @@ import dataclasses
 from enum import Enum, IntEnum
 from typing import Type
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 
 class Timeout(IntEnum):
     TEST = 180
@@ -42,6 +46,7 @@ class GPU:
 
 
 def _make_gpu_lookup(runner_map: dict[str, Type[Enum]]):
+    logger.debug("building_gpu_lookup", runners=list(runner_map.keys()))
     lookup = {}
     for runner, gpus in runner_map.items():
         for name, member in gpus.__members__.items():
@@ -55,8 +60,9 @@ _GPU_LOOKUP = _make_gpu_lookup({"Modal": ModalGPU, "GitHub": GitHubGPU})
 
 
 def get_gpu_by_name(name: str) -> GPU:
-    name = name.lower()
-    return _GPU_LOOKUP.get(name, None)
+    result = _GPU_LOOKUP.get(name.lower(), None)
+    logger.debug("get_gpu_by_name", name=name, found=result is not None)
+    return result
 
 
 class ExitCode(IntEnum):

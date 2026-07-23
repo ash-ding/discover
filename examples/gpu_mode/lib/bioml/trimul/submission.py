@@ -1,6 +1,9 @@
+import structlog
 import torch
 from torch import nn, einsum
 from task import input_t, output_t
+
+logger = structlog.get_logger(__name__)
 
 class TriMul(nn.Module):
     def __init__(
@@ -68,16 +71,7 @@ class TriMul(nn.Module):
 
 
 def custom_kernel(data: input_t) -> output_t:
-    """
-    Reference implementation of TriMul using PyTorch.
-    
-    Args:
-        data: Tuple of (input: torch.Tensor, mask: torch.Tensor, weights: Dict[str, torch.Tensor], config: Dict)
-            - input: Input tensor of shape [batch_size, seq_len, seq_len, dim]
-            - mask: Mask tensor of shape [batch_size, seq_len, seq_len]
-            - weights: Dictionary containing model weights
-            - config: Dictionary containing model configuration parameters
-    """
+    logger.info("trimul_custom_kernel_start")
     input_tensor, mask, weights, config = data
     trimul = TriMul(config["dim"], config["hidden_dim"]).to(input_tensor.device)
 
