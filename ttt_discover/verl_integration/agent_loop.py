@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
+import structlog
 import torch
 import transfer_queue as tq
 from tensordict import NonTensorData, NonTensorStack, TensorDict
@@ -37,8 +38,8 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopMetrics
 from verl.utils.ray_utils import auto_await
 from verl.utils.tensordict_utils import list_of_dict_to_tensordict
 
-logger = logging.getLogger(__name__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+logging.getLogger(__name__).setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
+logger = structlog.get_logger(__name__)
 
 
 @ray.remote
@@ -178,7 +179,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         self, prompt: dict, trajectory: dict, validate: bool
     ) -> None:
         """Generate n completions with two-phase completion for a pre-assigned PUCT state."""
-        logger.info(f"_run_prompt_discover called, keys={list(prompt.keys())}")
+        logger.info("run_prompt_discover_called", keys=list(prompt.keys()))
         uid = prompt["uid"]
         partition_id = "train" if not validate else "val"
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
@@ -229,9 +230,8 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 "stop_token_ids": self._stop_token_ids,
             }
 
-            # Debug: log prompt tokens to verify format
             decoded_end = self._tokenizer.decode(prompt_ids[-20:])
-            logger.info(f"Prompt ends with: {repr(decoded_end)}")
+            logger.debug("prompt_tail", decoded_end=repr(decoded_end))
 
             # Generate + eval per session (continuous batching via Ray)
             tasks = []
@@ -254,7 +254,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             error_count = 0
             for i, r in enumerate(results):
                 if isinstance(r, Exception):
-                    logger.error(f"Session {i} failed: {type(r).__name__}: {r}")
+                    logger.error("session_failed", session=i, error_type=type(r).__name__, error=str(r))
                     error_count += 1
                 else:
                     valid_results.append(r)
@@ -288,16 +288,14 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                         failed_parents, step=global_steps
                     ))
 
-                logger.info(
-                    f"Prompt {uid} rollout summary: "
-                    f"total={len(results)}, valid={len(valid_results)}, errors={error_count}, "
-                    f"success={len(successful_states)}, failed={len(failed_parents)}"
-                )
+                logger.info("rollout_summary", uid=uid, total=len(results),
+                            valid=len(valid_results), errors=error_count,
+                            success=len(successful_states), failed=len(failed_parents))
 
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
 
         except Exception as e:
-            logger.exception(f"Error in _run_prompt_discover: {e}")
+            logger.exception("run_prompt_discover_error", error=str(e))
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
     async def _generate_two_phase(
@@ -319,11 +317,10 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         prompt_len = len(prompt_ids)
         phase1_budget = self._phase1_max_tokens - prompt_len
         if phase1_budget <= 0:
-            logger.warning(f"Prompt too long ({prompt_len}), using minimal budget")
+            logger.warning("prompt_too_long", prompt_len=prompt_len)
             phase1_budget = 100
 
-        # Phase 1: thinking (with stop sequences)
-        logger.info(f"_generate_two_phase: session={session_id}, prompt_len={prompt_len}, phase1_budget={phase1_budget}")
+        logger.info("generate_two_phase_start", session=session_id, prompt_len=prompt_len, phase1_budget=phase1_budget)
         request_id = uuid.uuid4().hex
         phase1_output = await self.llm_client.generate(
             request_id=request_id,
@@ -333,7 +330,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
 
         p1_tokens = phase1_output.token_ids
         p1_logprobs = phase1_output.log_probs or [0.0] * len(p1_tokens)
-        logger.info(f"Phase1 result: {len(p1_tokens)} tokens, stop_reason={phase1_output.stop_reason}, first_tokens={p1_tokens[:10]}")
+        logger.info("phase1_result", token_count=len(p1_tokens), stop_reason=phase1_output.stop_reason)
 
         hit_stop = (
             phase1_output.stop_reason == "stop"
@@ -443,7 +440,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 eval_server = self._discover_config.get("gpu_eval_server", "")
                 has_triton = "@triton.jit" in code
 
-                logger.debug(f"Eval dispatch: eval_server='{eval_server}', has_triton={has_triton}, code_len={len(code)}")
+                logger.debug("eval_dispatch", eval_server=eval_server, has_triton=has_triton, code_len=len(code))
 
                 if eval_server and has_triton:
                     import urllib.request
@@ -459,7 +456,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                         try:
                             req = urllib.request.Request(f"{eval_url}/", data=payload,
                                                          headers={"Content-Type": "application/json"})
-                            logger.debug(f"HTTP POST to {eval_url}/, payload_size={len(payload)}, timeout={eval_timeout}, attempt={attempt}")
+                            logger.debug("http_eval_request", url=eval_url, payload_size=len(payload), timeout=eval_timeout, attempt=attempt)
                             result = await asyncio.to_thread(
                                 lambda: json.loads(urllib.request.urlopen(req, timeout=eval_timeout).read())
                             )
@@ -468,14 +465,14 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                                 score = float(score_scale / raw_score_us)
                             else:
                                 eval_error = str(result.get("error", ""))[:500]
-                            logger.debug(f"HTTP result: success={result.get('success')}, score_us={result.get('score_us')}, final_score={score}")
+                            logger.debug("http_eval_result", success=result.get("success"), score_us=result.get("score_us"), final_score=score)
                             break
                         except Exception as e:
-                            logger.warning(f"HTTP eval attempt {attempt} failed: {e}")
+                            logger.warning("http_eval_attempt_failed", attempt=attempt, error=str(e))
                             if attempt < max_retries:
                                 await asyncio.sleep(5 * (attempt + 1))
                             else:
-                                logger.error(f"HTTP eval failed after {max_retries} retries")
+                                logger.error("http_eval_exhausted", max_retries=max_retries)
                                 eval_error = f"HTTP error: {e}"
                 elif eval_server and not has_triton:
                     eval_error = "no @triton.jit in code"
@@ -498,7 +495,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                         if score == 0.0:
                             eval_error = extra_info.get("_eval_msg", "")[:500]
             except Exception as e:
-                logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
+                logger.warning("reward_eval_failed", error_type=type(e).__name__, error=str(e))
                 score = 0.0
                 eval_error = f"{type(e).__name__}: {e}"
         elif not code and not validate:
@@ -637,7 +634,7 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
         except Exception:
             pass
 
-        logger.info(f"DiscoverAgentLoopManagerTQ init: GPU_EVAL_SERVER='{gpu_eval_from_env}', score_scale={self._discover_config.get('score_scale', 'N/A')}")
+        logger.info("manager_init", gpu_eval_server=gpu_eval_from_env, score_scale=self._discover_config.get("score_scale", "N/A"))
 
         resume_step = self._detect_puct_resume_step()
         self._puct_actor = PUCTSamplerActor.remote(
@@ -672,7 +669,7 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
         if not steps:
             return None
         latest = max(steps)
-        logger.info(f"Detected PUCT state at step {latest}, will resume from it")
+        logger.info("puct_resume_detected", step=latest)
         return latest
 
     @classmethod
@@ -691,7 +688,7 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
     def generate_sequences(self, prompts: TensorDict) -> None:
         """Sample PUCT states at batch level, assign to prompts, then dispatch."""
         batch_size = len(prompts)
-        logger.info(f"DiscoverAgentLoopManagerTQ.generate_sequences: batch_size={batch_size}, keys={list(prompts.keys())}")
+        logger.info("generate_sequences", batch_size=batch_size, keys=list(prompts.keys()))
 
         # Extract global_steps for PUCT tracking
         if "global_steps" in prompts:

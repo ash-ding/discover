@@ -5,8 +5,11 @@ from contextlib import contextmanager
 from typing import Optional
 
 import modal  # pyright: ignore[reportMissingImports]
+import structlog
 
 from libkernelbot.run_eval import FullResult, SystemInfo, run_config
+
+logger = structlog.get_logger(__name__)
 
 class TimeoutException(Exception):
     pass
@@ -31,6 +34,7 @@ _requeue_counts = None
 def _get_requeue_counts():
     global _requeue_counts
     if _requeue_counts is None:
+        logger.debug("initializing_requeue_counts_dict")
         _requeue_counts = modal.Dict.from_name(_REQUEUE_COUNT_DICT_NAME, create_if_missing=True)
     return _requeue_counts
 
@@ -50,6 +54,7 @@ def _increment_requeue_count(request_id: str) -> int:
         current = 0
     current += 1
     d[request_id] = current
+    logger.debug("requeue_count_incremented", request_id=request_id, count=current)
     return current
 
 
@@ -59,16 +64,12 @@ def _pop_requeue_count(request_id: str) -> int:
         value = d.pop(request_id)
     except KeyError:
         value = 0
+    logger.debug("requeue_count_popped", request_id=request_id, value=int(value or 0))
     return int(value or 0)
 
 
 def _detect_nvidia_gpu_names() -> list[str]:
-    """
-    Best-effort GPU name detection using nvidia-smi.
-
-    Returns:
-        A list of GPU names (one per visible GPU). Empty list if unavailable.
-    """
+    logger.debug("detecting_nvidia_gpu_names")
     try:
         proc = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -83,6 +84,7 @@ def _detect_nvidia_gpu_names() -> list[str]:
         return []
 
     names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    logger.info("detected_gpu_names", names=names)
     return names
 
 
@@ -109,11 +111,12 @@ def modal_run_config(  # noqa: C901
     config: dict,
     timeout_seconds: int = 1200,
 ) -> FullResult:
-    """Modal version of run_pytorch_script, handling timeouts"""
     request_id = _get_request_id(config)
+    logger.info("modal_run_config_start", request_id=request_id, timeout=timeout_seconds)
     try:
         gpu_names = _detect_nvidia_gpu_names()
         if any(name in _BANNED_GPU_NAMES for name in gpu_names):
+            logger.warning("banned_gpu_detected", gpu_names=gpu_names)
             attempt = None
             if request_id is not None:
                 attempt = _increment_requeue_count(request_id)
@@ -133,11 +136,11 @@ def modal_run_config(  # noqa: C901
             result.system.requeues = _pop_requeue_count(request_id)
         return result
     except RuntimeError as e:
-        # Only propagate our sentinel runtime error to trigger Modal retries.
-        # Any other RuntimeError from user code should *not* be requeued.
         if str(e).startswith(_REQUEUE_SENTINEL):
+            logger.info("requeue_sentinel_propagated", request_id=request_id)
             raise
         requeues = _pop_requeue_count(request_id) if request_id is not None else 0
+        logger.error("modal_run_runtime_error", request_id=request_id, error=str(e))
         exception = "".join(traceback.format_exception(e))
         return FullResult(
             success=False,
@@ -147,6 +150,7 @@ def modal_run_config(  # noqa: C901
         )
     except TimeoutException as e:
         requeues = _pop_requeue_count(request_id) if request_id is not None else 0
+        logger.error("modal_run_timeout", request_id=request_id, error=str(e))
         return FullResult(
             success=False,
             error=f"Timeout Error: {str(e)}",
@@ -154,10 +158,9 @@ def modal_run_config(  # noqa: C901
             system=SystemInfo(requeues=requeues),
         )
     except BaseException as e:
-        # Important: user submissions may raise SystemExit (e.g., via sys.exit or argparse)
-        # which is not an Exception. If we let it propagate, Modal retries would requeue it,
-        # which we do NOT want. Convert all other throwables into a normal failure result.
         requeues = _pop_requeue_count(request_id) if request_id is not None else 0
+        logger.error("modal_run_base_exception", request_id=request_id,
+                      error_type=type(e).__name__, error=str(e))
         exception = "".join(traceback.format_exception(e))
         return FullResult(
             success=False,

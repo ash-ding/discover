@@ -1,9 +1,12 @@
 import math
 from dataclasses import dataclass
+import structlog
 import torch
 from torch import nn
 import torch.nn.functional as F
 from task import input_t, output_t
+
+logger = structlog.get_logger(__name__)
 
 class RoPE(nn.Module):
     def __init__(self, d_model: int):
@@ -13,10 +16,12 @@ class RoPE(nn.Module):
         self.register_buffer("theta", theta)
 
     def rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        logger.debug("rope_rotate_half", shape=list(x.shape))
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
 
     def forward(self, x: torch.Tensor, start_pos: int = 0) -> torch.Tensor:
+        logger.debug("rope_forward", seq_len=x.size(-2), start_pos=start_pos)
         seq_len = x.size(-2)
         d_model = x.size(-1)
         assert d_model == self.d_model
@@ -42,6 +47,7 @@ class KVCache(nn.Module):
         return self.data
 
     def forward(self, c_kv: torch.Tensor) -> torch.Tensor:
+        logger.debug("kvcache_forward", new_tokens=c_kv.size(1), current_len=self.seq_len)
         assert self.seq_len + c_kv.size(1) <= self.data.size(1), "KV Cache Exceeded"
 
         self.data = self.data.to(c_kv.dtype)
@@ -98,7 +104,7 @@ class MLA(nn.Module):
         self.eps = 1e-6
    
     def forward(self, x: torch.Tensor, kv_cache: KVCache) -> torch.Tensor:
-        # seq_len = 1 always here
+        logger.debug("mla_forward", batch_size=x.size(0), seq_len=x.size(1), dim=x.size(2))
         batch_size, seq_len, model_dim = x.size()
 
         ################################################################################
@@ -154,6 +160,7 @@ class MLA(nn.Module):
         return y, kv_cache.get_data()
 
 def custom_kernel(data: input_t) -> output_t:
+    logger.info("mla_custom_kernel_start")
     config, x, kv_cache = data
     model = MLA(config).to('cuda')
     model.Q_proj_down.weight = nn.Parameter(config.Q_proj_down_weight)

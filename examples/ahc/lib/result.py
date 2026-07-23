@@ -3,8 +3,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Sequence
 
+import structlog
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+
+logger = structlog.get_logger(__name__)
 
 
 class CodeRunResult(BaseModel):
@@ -129,13 +132,13 @@ class ResourceUsage(BaseModel):
     )
 
     def __add__(self, other: "ResourceUsage") -> "ResourceUsage":
-        """Add two ResourceUsage objects."""
+        logger.debug("resource_usage_add")
         return ResourceUsage(
             **{field: getattr(self, field) + getattr(other, field) for field in ResourceUsage.model_fields.keys()}
         )
 
     def __sub__(self, other: "ResourceUsage") -> "ResourceUsage":
-        """Subtract two ResourceUsage objects."""
+        logger.debug("resource_usage_sub")
         return ResourceUsage(
             **{field: getattr(self, field) - getattr(other, field) for field in ResourceUsage.model_fields.keys()}
         )
@@ -215,7 +218,7 @@ class Result(BaseModel):
     @field_validator("case_results")
     @classmethod
     def validate_case_results(cls, case_results: list[CaseResult]) -> list[CaseResult]:
-        """Validate the case results."""
+        logger.debug("validate_case_results", count=len(case_results))
         if len(case_results) == 0:
             raise ValueError("The case results must not be empty.")
         return case_results

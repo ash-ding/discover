@@ -1,9 +1,13 @@
 import numpy as np
+import structlog
 
 from ttt_discover import Environment, SandboxRewardEvaluator, State, DiscoverConfig, discover
 
+logger = structlog.get_logger(__name__)
+
 
 def verify_c5_solution(h_values: np.ndarray, c5_achieved: float, n_points: int):
+    logger.debug("verify_c5_solution", c5_achieved=c5_achieved, n_points=n_points)
     if not isinstance(h_values, np.ndarray):
         try:
             h_values = np.array(h_values, dtype=np.float64)
@@ -47,6 +51,7 @@ def verify_c5_solution(h_values: np.ndarray, c5_achieved: float, n_points: int):
 
 
 def evaluate_erdos_solution(h_values: np.ndarray, c5_bound: float, n_points: int) -> float:
+    logger.debug("evaluate_erdos_solution", c5_bound=c5_bound, n_points=n_points)
     verify_c5_solution(h_values, c5_bound, n_points)
     return float(c5_bound)
 
@@ -56,9 +61,12 @@ def verify_erdos_solution(result: tuple[np.ndarray, float, int]) -> bool:
         h_values, c5_bound, n_points = result
         c5_bound = evaluate_erdos_solution(h_values, c5_bound, n_points)
         if c5_bound <= 0 or np.isnan(c5_bound) or np.isinf(c5_bound):
+            logger.warning("verify_erdos_invalid_bound", c5_bound=c5_bound)
             return False
     except Exception:
+        logger.warning("verify_erdos_exception", exc_info=True)
         return False
+    logger.debug("verify_erdos_ok", c5_bound=c5_bound)
     return True
 
 
@@ -67,6 +75,8 @@ class ErdosMinOverlapRewardEvaluator(SandboxRewardEvaluator):
         return "run"
 
     def preprocess_generation(self, generation, state) -> str:
+        logger.debug("preprocess_generation", has_state=state is not None,
+                      has_construction=state is not None and getattr(state, 'construction', None) is not None)
         import inspect
         verifier_src = inspect.getsource(verify_c5_solution)
         numpy_import = "import numpy as np"
@@ -86,14 +96,18 @@ class ErdosMinOverlapRewardEvaluator(SandboxRewardEvaluator):
         return base + generation
 
     def get_reward(self, code: str, state: State) -> float:
+        logger.debug("get_reward_start", code_len=len(code))
         output, error_msg = self.execute_code(code, state)
-        if error_msg: 
+        if error_msg:
+            logger.info("get_reward_exec_error", error_msg=error_msg[:200])
             return self._get_failure_entry(error_msg)
 
         if not verify_erdos_solution(output):
+            logger.info("get_reward_invalid_solution")
             return self._get_failure_entry("Invalid solution.")
         h_values, c5_bound, n_points = output
         c5_bound = evaluate_erdos_solution(h_values, c5_bound, n_points)
+        logger.info("get_reward_success", c5_bound=c5_bound, n_points=n_points)
 
         return {
             "reward": float(1.0 / (1e-8 + c5_bound)),
@@ -112,6 +126,7 @@ class ErdosMinOverlapEnv(Environment):
 
     @classmethod
     def create_initial_state(cls, problem_type: str) -> State:
+        logger.debug("create_initial_state", problem_type=problem_type)
         rng = np.random.default_rng()
         n_points = rng.integers(40, 100)
         construction = np.ones(n_points) * 0.5
@@ -121,12 +136,15 @@ class ErdosMinOverlapEnv(Environment):
         dx = 2.0 / n_points
         correlation = np.correlate(construction, 1 - construction, mode="full") * dx
         c5_bound = float(np.max(correlation))
+        logger.info("initial_state_created", n_points=int(n_points), c5_bound=c5_bound)
         return State(timestep=-1, code="", value=-c5_bound, construction=list(construction))
 
     def is_maximize(self) -> bool:
         return False # Minimize upper bound
 
     def get_question(self) -> str:
+        logger.debug("get_question", state_timestep=self.initial_state.timestep,
+                      state_value=self.initial_state.value)
         state = self.initial_state
         state_ctx = state.to_prompt(0.3808, metric_name="C₅ bound", maximize=False)
         
@@ -192,6 +210,7 @@ Smaller sequences with less than 1k samples are preferred - they are faster to o
 
 
 def discover_erdos_min_overlap():
+    logger.info("discover_erdos_min_overlap_start")
     config = DiscoverConfig(
         env_type=ErdosMinOverlapEnv,
         problem_type="",
@@ -205,6 +224,7 @@ def discover_erdos_min_overlap():
 
 
 def discover_erdos_min_overlap_local():
+    logger.info("discover_erdos_min_overlap_local_start")
     config = DiscoverConfig(
         env_type=ErdosMinOverlapEnv,
         problem_type="",

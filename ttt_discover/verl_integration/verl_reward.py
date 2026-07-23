@@ -8,7 +8,9 @@ import logging
 import re
 import threading
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 _evaluator_cache = {}
 _evaluator_lock = threading.Lock()
@@ -26,6 +28,9 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
     problem_type = extra.get("problem_type", "26")
     eval_timeout = extra.get("eval_timeout", 530)
     num_cpus = extra.get("num_cpus_per_task", 1)
+
+    logger.debug("compute_score_start", env_module=env_module, env_class=env_class,
+                 problem_type=problem_type, eval_timeout=eval_timeout)
 
     cache_key = (env_module, env_class, problem_type, eval_timeout)
     try:
@@ -46,8 +51,9 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
         result = evaluator.get_reward(solution_str, state=extra.get("state"))
         reward = float(result.get("reward", 0.0))
         msg = result.get("msg", "")
+        logger.debug("compute_score_result", reward=reward, msg=msg)
         return {"score": reward, "eval_msg": msg,
                 "result_construction": result.get("result_construction")}
     except Exception as e:
-        logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
+        logger.warning("reward_eval_failed", error_type=type(e).__name__, error=str(e))
         return {"score": 0.0, "eval_msg": f"{type(e).__name__}: {e}"}

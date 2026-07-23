@@ -1,9 +1,13 @@
+import math
+
+import structlog
+import torch
+from torch import nn, einsum
+
 from utils import make_match_reference, DisableCuDNNTF32
 from task import input_t, output_t
 
-import torch
-from torch import nn, einsum
-import math
+logger = structlog.get_logger(__name__)
 
 # Reference code in PyTorch
 class TriMul(nn.Module):
@@ -73,18 +77,7 @@ class TriMul(nn.Module):
 
 
 def ref_kernel(data: input_t) -> output_t:
-    """
-    Reference implementation of TriMul using PyTorch.
-    
-    Args:
-        data: Tuple of (input: torch.Tensor, mask: torch.Tensor, weights: Dict[str, torch.Tensor], config: Dict)
-            - input: Input tensor of shape [batch_size, seq_len, seq_len, dim]
-            - mask: Mask tensor of shape [batch_size, seq_len, seq_len]
-            - weights: Dictionary containing model weights
-            - config: Dictionary containing model configuration parameters
-    """
-
-    # Use deterministic kernels and disable TF32 for accuracy
+    logger.info("ref_kernel_start")
     with DisableCuDNNTF32():
         input_tensor, mask, weights, config = data
         trimul = TriMul(dim=config["dim"], hidden_dim=config["hidden_dim"], device=input_tensor.device)
@@ -102,11 +95,11 @@ def ref_kernel(data: input_t) -> output_t:
         trimul.to_out.weight = nn.Parameter(weights['to_out.weight'])
 
         output = trimul(input_tensor, mask)
+        logger.info("ref_kernel_complete", output_shape=list(output.shape))
 
         return output
 
 
-# Input generation for the reference code
 def generate_input(
     seqlen: int,
     bs: int,
@@ -116,8 +109,8 @@ def generate_input(
     nomask: bool,
     distribution: str,
 ) -> input_t:
-
-    # Really dumb but for now _ isn't parsing correctly.
+    logger.info("generate_input", seqlen=seqlen, bs=bs, dim=dim,
+                 hiddendim=hiddendim, seed=seed, distribution=distribution)
     batch_size = bs
     seq_len = seqlen
     hidden_dim = hiddendim

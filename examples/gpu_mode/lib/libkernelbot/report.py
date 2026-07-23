@@ -3,9 +3,13 @@ import dataclasses
 import textwrap
 from typing import List
 
+import structlog
+
 from libkernelbot import consts
 from libkernelbot.run_eval import CompileResult, EvalResult, FullResult, RunResult, SystemInfo
 from libkernelbot.utils import format_time, limit_length
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclasses.dataclass
@@ -60,15 +64,19 @@ class RunResultReport:
         self.data: List[Text | Log | Link | File] = data or []
 
     def add_text(self, section: str):
+        logger.debug("report_add_text", length=len(section))
         self.data.append(Text(section))
 
     def add_log(self, header: str, log: str):
+        logger.debug("report_add_log", header=header, length=len(log))
         self.data.append(Log(header, log))
 
     def add_link(self, title: str, text: str, url: str):
+        logger.debug("report_add_link", title=title)
         self.data.append(Link(title, text, url))
 
     def add_file(self, name: str, message: str, content: bytes):
+        logger.debug("report_add_file", name=name, size=len(content))
         self.data.append(File(name, message, content))
 
     def __repr__(self):
@@ -76,6 +84,7 @@ class RunResultReport:
 
 
 def _generate_compile_report(reporter: "RunResultReport", comp: CompileResult):
+    logger.info("generate_compile_report", nvcc_found=comp.nvcc_found, success=comp.success)
     message = ""
     if not comp.nvcc_found:
         message += "# Compilation failed\nNVCC could not be found.\n"
@@ -98,6 +107,7 @@ def _generate_compile_report(reporter: "RunResultReport", comp: CompileResult):
 
 
 def _generate_crash_report(reporter: "RunResultReport", run: RunResult):
+    logger.info("generate_crash_report", exit_code=run.exit_code, duration=run.duration)
     message = "# Running failed\n"
     message += "Command "
     message += f"```bash\n{limit_length(run.command, 1000)}```\n"
@@ -117,6 +127,7 @@ def _generate_crash_report(reporter: "RunResultReport", run: RunResult):
 
 
 def _generate_test_report(reporter: "RunResultReport", run: RunResult):
+    logger.info("generate_test_report", duration=run.duration)
     message = "# Testing failed\n"
     message += "Command "
     message += f"```bash\n{limit_length(run.command, 1000)}```\n"
@@ -134,9 +145,7 @@ def _generate_test_report(reporter: "RunResultReport", run: RunResult):
 
 
 def _short_fail_reason(run: RunResult):
-    """
-    Translate the exit code of `run` into a short error identifier.
-    """
+    logger.debug("short_fail_reason", exit_code=run.exit_code)
     if run.exit_code == consts.ExitCode.TIMEOUT_EXPIRED:
         return " (timeout)"
     elif run.exit_code == consts.ExitCode.CUDA_FAIL:
@@ -148,10 +157,7 @@ def _short_fail_reason(run: RunResult):
 
 
 def make_short_report(runs: dict[str, EvalResult], full=True) -> list[str]:  # noqa: C901
-    """
-    Creates a minimalistic report for `runs`,
-    returned as a list of status strings
-    """
+    logger.debug("make_short_report", run_keys=list(runs.keys()), full=full)
     any_compile = False
     result = []
     for r in runs.values():
@@ -216,6 +222,7 @@ def make_short_report(runs: dict[str, EvalResult], full=True) -> list[str]:  # n
 
 
 def make_test_log(run: RunResult) -> str:
+    logger.debug("make_test_log")
     test_log = []
     for i in range(len(run.result)):
         status = run.result.get(f"test.{i}.status", None)
@@ -241,6 +248,7 @@ def make_test_log(run: RunResult) -> str:
 
 
 def make_benchmark_log(run: RunResult) -> str:
+    logger.debug("make_benchmark_log")
     num_bench = int(run.result.get("benchmark-count", 0))
 
     def log_one(base_name):
@@ -273,6 +281,7 @@ def make_benchmark_log(run: RunResult) -> str:
 
 
 def make_profile_log(run: RunResult) -> str:
+    logger.debug("make_profile_log")
     num_bench = int(run.result.get("benchmark-count", 0))
 
     def log_one(base_name):
@@ -293,6 +302,7 @@ def make_profile_log(run: RunResult) -> str:
 
 
 def generate_system_info(system: SystemInfo):
+    logger.debug("generate_system_info", gpu=system.gpu, hostname=system.hostname)
     return f"""
 Running on:
 * GPU: `{system.gpu}`
@@ -307,6 +317,8 @@ Running on:
 
 
 def _handle_crash_report(report: RunResultReport, run_result: EvalResult):
+    logger.debug("handle_crash_report", has_compilation=run_result.compilation is not None,
+                  run_success=run_result.run.success)
     if run_result.compilation is not None and not run_result.compilation.success:
         _generate_compile_report(report, run_result.compilation)
         return True
@@ -323,6 +335,7 @@ def _shortname(spec: str):
 
 
 def generate_report(result: FullResult, extra_text: str = "") -> RunResultReport:  # noqa: C901
+    logger.info("generate_report", run_keys=list(result.runs.keys()), success=result.success)
     runs = result.runs
     report = RunResultReport()
     if extra_text and len(extra_text.strip()) > 0:
@@ -421,6 +434,7 @@ class RunProgressReporter:
         self.lines = []
 
     async def push(self, content: str | list[str]):
+        logger.debug("progress_push", title=self.title)
         if isinstance(content, str):
             self.lines.append(f"> {content}")
         else:
@@ -429,10 +443,12 @@ class RunProgressReporter:
         await self._update_message()
 
     async def update(self, new_content: str):
+        logger.debug("progress_update", title=self.title)
         self.lines[-1] = f"> {new_content}"
         await self._update_message()
 
     async def update_title(self, new_title):
+        logger.debug("progress_update_title", old_title=self.title, new_title=new_title)
         self.title = new_title
         await self._update_message()
 

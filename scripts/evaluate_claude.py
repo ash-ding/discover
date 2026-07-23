@@ -100,88 +100,55 @@ def evaluate_erdos_worker(idx, code, timeout, result_queue):
         result_queue.put((idx, 0.0, f"error:{type(e).__name__}"))
 
 
-def evaluate_gpu_mode_worker(idx, code, timeout, result_queue):
-    """Evaluate GPU Mode (trimul) task.
+ENTRY_FUNCTIONS = {"gpu_mode": "custom_kernel"}
 
-    Uses remote eval server if GPU_EVAL_SERVER is set, otherwise local GPU.
-    """
+
+def evaluate_gpu_mode_direct(idx, code, timeout):
+    """Evaluate GPU mode via remote eval server (no subprocess needed)."""
+    eval_server = os.getenv("GPU_EVAL_SERVER")
+    if not eval_server:
+        return idx, 0.0, "no_eval_server"
+
+    import requests
+
+    task_name = os.getenv("GPU_TASK_NAME", "trimul")
     try:
-        eval_server = os.getenv("GPU_EVAL_SERVER")
+        response = requests.post(
+            eval_server,
+            json={"code": code, "task_name": task_name, "gpu_type": "H100"},
+            timeout=3600,
+        )
+        if response.status_code != 200:
+            return idx, 0.0, f"server_error_{response.status_code}"
 
-        if eval_server:
-            # Remote evaluation via HTTP
-            import requests
-
-            exec_globals = {"__builtins__": __builtins__}
-            exec(code, exec_globals)
-
-            if "run" not in exec_globals:
-                result_queue.put((idx, 0.0, "no_run_func"))
-                return
-
-            # Generate kernel code
-            kernel_code = exec_globals["run"](seed=42, budget_s=min(timeout, 120))
-
-            # Send to eval server
-            response = requests.post(
-                f"{eval_server}/evaluate",
-                json={"code": kernel_code, "timeout": timeout},
-                timeout=timeout + 30
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                score = result.get("tflops", 0.0)
-                status = result.get("status", "unknown")
-                result_queue.put((idx, score, status))
-            else:
-                result_queue.put((idx, 0.0, f"server_error_{response.status_code}"))
-
+        result = response.json()
+        if result.get("success"):
+            score_us = result["score_us"]
+            return idx, float(score_us), f"score_us={score_us:.2f}"
         else:
-            # Local evaluation (requires GPU)
-            import torch
-            import triton
+            error = str(result.get("error", "unknown"))[:200]
+            return idx, 0.0, f"eval_fail:{error}"
 
-            exec_globals = {"__builtins__": __builtins__}
-            exec("import torch", exec_globals)
-            exec("import triton", exec_globals)
-            exec("import triton.language as tl", exec_globals)
-
-            exec(code, exec_globals)
-
-            if "run" not in exec_globals:
-                result_queue.put((idx, 0.0, "no_run_func"))
-                return
-
-            # Run kernel and measure performance
-            gpu_id = int(os.getenv("KERNEL_EVAL_GPU", "0"))
-            device = torch.device(f"cuda:{gpu_id}")
-
-            kernel_result = exec_globals["run"](seed=42, budget_s=min(timeout, 120))
-
-            # kernel_result should contain TFLOPs measurement
-            if isinstance(kernel_result, (int, float)):
-                score = float(kernel_result)
-                result_queue.put((idx, score, f"tflops={score:.2f}"))
-            else:
-                result_queue.put((idx, 0.0, "bad_return"))
-
+    except requests.exceptions.Timeout:
+        return idx, 0.0, "http_timeout"
     except Exception as e:
-        result_queue.put((idx, 0.0, f"error:{type(e).__name__}"))
+        return idx, 0.0, f"error:{type(e).__name__}:{str(e)[:100]}"
 
 
 def evaluate_with_timeout(idx, code, timeout, task):
-    """Spawn a process and kill it if it exceeds timeout."""
-    if not code or "def run" not in code:
+    """Evaluate a rollout with timeout. Uses subprocess for CPU tasks, direct HTTP for GPU."""
+    entry_func = ENTRY_FUNCTIONS.get(task, "run")
+    if not code or f"def {entry_func}" not in code:
         return idx, 0.0, "no_code"
+
+    if task == "gpu_mode":
+        return evaluate_gpu_mode_direct(idx, code, timeout)
 
     q = Queue()
 
     # Select worker based on task
     if task == "erdos":
         worker = evaluate_erdos_worker
-    elif task == "gpu_mode":
-        worker = evaluate_gpu_mode_worker
     else:
         return idx, 0.0, f"unsupported_task_{task}"
 
@@ -209,7 +176,8 @@ def main():
 
     step = os.getenv("STEP", "1")
     timeout = int(os.getenv("EVAL_TIMEOUT", "120"))
-    max_workers = int(os.getenv("EVAL_WORKERS", "32"))
+    default_workers = "256" if task == "gpu_mode" else "32"
+    max_workers = int(os.getenv("EVAL_WORKERS", default_workers))
 
     input_file = Path(f"checkpoints/claude_{task}_step{step}.jsonl")
     output_file = Path(f"checkpoints/claude_{task}_step{step}_scored.jsonl")
@@ -227,7 +195,7 @@ def main():
             rollouts.append(json.loads(line))
 
     print(f"Total rollouts: {len(rollouts)}")
-    has_code = sum(1 for r in rollouts if r.get("has_run"))
+    has_code = sum(1 for r in rollouts if r.get("has_entry", r.get("has_run")))
     print(f"Has def run(): {has_code}/{len(rollouts)}")
 
     scores = [0.0] * len(rollouts)
@@ -278,10 +246,10 @@ def main():
             print(f"Reward Mean (success): {sum(nonzero)/len(nonzero):.6f}")
             print(f"C5 bound min (best): {min(c5_bounds):.6f}")
         elif task == "gpu_mode":
-            # For GPU mode: score = TFLOPs (higher is better)
-            print(f"TFLOPs Max: {max(nonzero):.2f}")
-            print(f"TFLOPs Mean (all): {sum(scores)/len(scores):.2f}")
-            print(f"TFLOPs Mean (success): {sum(nonzero)/len(nonzero):.2f}")
+            # For GPU mode: score = score_us (microseconds, lower is better)
+            print(f"Runtime min (best): {min(nonzero):.2f} us")
+            print(f"Runtime max: {max(nonzero):.2f} us")
+            print(f"Runtime mean (success): {sum(nonzero)/len(nonzero):.2f} us")
 
     from collections import Counter
     status_counts = Counter(statuses)

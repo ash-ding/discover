@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import structlog
 from PIL import Image
 from pydantic import Field
 from pydantic.functional_serializers import PlainSerializer
@@ -12,6 +13,8 @@ from typing_extensions import Annotated
 from .data import Problem
 from .result import CaseResult, Result
 from .utils import base64_to_pil, pil_to_base64
+
+logger = structlog.get_logger(__name__)
 
 SerializableImage = Annotated[
     Image.Image,
@@ -46,7 +49,7 @@ class ProblemSerializable(Problem):
 
     @classmethod
     def from_problem(cls, problem: Problem) -> "ProblemSerializable":
-        """Create a ProblemSerializable from an existing Problem."""
+        logger.debug("from_problem", problem_type=type(problem).__name__)
         return cls.model_validate(problem.model_dump())
 
 
@@ -61,7 +64,7 @@ class CaseResultSerializable(CaseResult):
 
     @classmethod
     def from_case_result(cls, case_result: CaseResult) -> "CaseResultSerializable":
-        """Create a CaseResultSerializable from an existing CaseResult."""
+        logger.debug("from_case_result", judge_result=case_result.judge_result.value)
         return cls.model_validate(case_result.model_dump())
 
 
@@ -76,5 +79,5 @@ class ResultSerializable(Result):
 
     @classmethod
     def from_result(cls, result: Result) -> "ResultSerializable":
-        """Create a ResultSerializable from an existing Result."""
+        logger.debug("from_result", num_cases=len(result.case_results))
         return cls.model_validate(result.model_dump())
