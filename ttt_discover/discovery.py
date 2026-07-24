@@ -59,6 +59,7 @@ def init_ray(num_cpus_per_task: int, env_type: str):
     import ray
 
     os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
+    os.environ.setdefault("RAY_task_events_report_interval_ms", "0")
 
     if not ray.is_initialized():
         ray.init()

@@ -59,6 +59,9 @@ def main():
 
     logger.info(f"Config: {config}")
 
+    # Disable Ray task event telemetry (saves ~1-2ms per eval)
+    os.environ.setdefault("RAY_task_events_report_interval_ms", "0")
+
     # Initialize Ray
     import ray
     if not ray.is_initialized():

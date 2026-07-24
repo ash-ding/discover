@@ -4,6 +4,8 @@ Used by all CPU tasks (circle_packing, ac_inequalities, erdos, denoising, ahc)
 for local evaluation via subprocess + Ray. GPU tasks (trimul, mla_decode_nvidia)
 use :class:`ttt_discover.environments.http_eval_client.HttpEvalClient` instead.
 """
+import hashlib
+import logging
 import subprocess
 import sys
 import pickle
@@ -443,6 +445,28 @@ def run_program(program_code_path, function_name, max_cpus, eval_timeout_seconds
             pass
 
 
+_logger = logging.getLogger(__name__)
+
+
+@ray.remote(num_cpus=0)
+class PersistentEvalWorker:
+    """Persistent Ray actor that eliminates per-task Ray dispatch overhead.
+
+    Delegates to run_program() for actual subprocess execution, preserving
+    sandbox isolation. Workers stay alive across evaluations — only the Ray
+    scheduling cost is amortized.
+    """
+
+    def __init__(self, num_cpus_per_task: int):
+        self.num_cpus_per_task = num_cpus_per_task
+
+    def evaluate(self, code_path, function_name, num_cpus, timeout):
+        return run_program(code_path, function_name, num_cpus, timeout)
+
+    def ping(self):
+        return True
+
+
 class SandboxRewardEvaluator(BaseRewardEvaluator):
     """
     Sandboxed evaluator that executes model-generated code in a separate process
@@ -489,10 +513,10 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
         try:
             # Try to get existing actor by name
             _scheduler = ray.get_actor("cpu_scheduler")
-            print("[SandboxRewardEvaluator] Found existing cpu_scheduler actor.")
+            _logger.info("Found existing cpu_scheduler actor.")
         except ValueError:
             # If not found, create a new one
-            print("[SandboxRewardEvaluator] Creating new cpu_scheduler actor.")
+            _logger.info("Creating new cpu_scheduler actor.")
             _scheduler = CpuScheduler.options(
                 name="cpu_scheduler",
                 lifetime="detached"
@@ -500,6 +524,91 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
                 num_cpus_per_task=self.num_cpus_per_task,
                 num_persistent_workers=0
             )
+
+        # Persistent worker pool (Tier 1.1 optimization)
+        self._persistent_workers = []
+        self._worker_index = 0
+        config_key = f"{env_type}_{problem_type}_{num_cpus_per_task}"
+        self._instance_id = hashlib.md5(config_key.encode()).hexdigest()[:8]
+
+        use_persistent = os.environ.get(
+            "PERSISTENT_EVAL_WORKERS", "true"
+        ).lower() == "true"
+
+        if use_persistent:
+            self._init_persistent_workers(num_cpus_per_task)
+        else:
+            _logger.info("Persistent workers disabled via PERSISTENT_EVAL_WORKERS=false.")
+
+    def _init_persistent_workers(self, num_cpus_per_task: int):
+        try:
+            cluster_cpus = int(ray.cluster_resources().get("CPU", 0))
+            if cluster_cpus > 0 and num_cpus_per_task > cluster_cpus:
+                _logger.warning(
+                    "Task requires %d CPUs but cluster has %d. "
+                    "Disabling persistent workers.",
+                    num_cpus_per_task, cluster_cpus,
+                )
+                return
+            num_workers = max(1, cluster_cpus // max(1, num_cpus_per_task))
+            num_workers = min(num_workers, 64)
+            for i in range(num_workers):
+                name = f"persistent_eval_worker_{self._instance_id}_{i}"
+                try:
+                    w = ray.get_actor(name)
+                except ValueError:
+                    w = PersistentEvalWorker.options(
+                        lifetime="detached",
+                        name=name,
+                    ).remote(num_cpus_per_task=num_cpus_per_task)
+                self._persistent_workers.append(w)
+            _logger.info(
+                "Initialized %d persistent eval workers "
+                "(instance=%s, cluster has %d CPUs).",
+                len(self._persistent_workers), self._instance_id, cluster_cpus,
+            )
+        except Exception as e:
+            _logger.error(
+                "Failed to create persistent workers: %s. "
+                "Falling back to per-task remote.",
+                e,
+            )
+            self._persistent_workers = []
+
+    def _next_worker(self):
+        if not self._persistent_workers:
+            return None, -1
+        idx = self._worker_index % len(self._persistent_workers)
+        self._worker_index = (self._worker_index + 1) % len(self._persistent_workers)
+        return self._persistent_workers[idx], idx
+
+    def _handle_worker_crash(self, idx):
+        if idx < 0 or idx >= len(self._persistent_workers):
+            return
+        _logger.warning("Persistent worker %d crashed. Attempting to recreate.", idx)
+        try:
+            old_worker = self._persistent_workers[idx]
+            try:
+                ray.kill(old_worker)
+            except Exception:
+                pass
+            name = f"persistent_eval_worker_{self._instance_id}_{idx}"
+            new_worker = PersistentEvalWorker.options(
+                lifetime="detached",
+                name=name,
+            ).remote(num_cpus_per_task=self.num_cpus_per_task)
+            self._persistent_workers[idx] = new_worker
+            _logger.info("Recreated persistent worker %d.", idx)
+        except Exception as e:
+            _logger.error(
+                "Failed to recreate worker %d: %s. Removing from pool.", idx, e,
+            )
+            self._persistent_workers.pop(idx)
+            if not self._persistent_workers:
+                _logger.error(
+                    "All persistent workers dead. "
+                    "Falling back to per-task remote."
+                )
 
     def preprocess_generation(self, generation, state) -> str:
         import inspect
@@ -572,18 +681,57 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
         expected_stdout_path = Path(code_path).with_suffix(".pkl.stdout")
 
         try:
-            result_path_future = (
-                self.exec_fn.options(scheduling_strategy="SPREAD")
-                .remote(
-                    code_path,
-                    self.get_program_entrypoint(),
-                    self.num_cpus_per_task,
-                    self.eval_timeout + 5,  # remote-side timeout
-                )
-            )
+            worker, worker_idx = self._next_worker()
+            used_worker = worker is not None
 
-            # BUG-008: Add client-side timeout to prevent indefinite hangs
-            results_path = ray.get(result_path_future, timeout=self.eval_timeout + 30)
+            try:
+                if used_worker:
+                    result_path_future = worker.evaluate.remote(
+                        code_path,
+                        self.get_program_entrypoint(),
+                        self.num_cpus_per_task,
+                        self.eval_timeout + 5,
+                    )
+                else:
+                    result_path_future = (
+                        self.exec_fn.options(scheduling_strategy="DEFAULT")
+                        .remote(
+                            code_path,
+                            self.get_program_entrypoint(),
+                            self.num_cpus_per_task,
+                            self.eval_timeout + 5,
+                        )
+                    )
+
+                results_path = ray.get(
+                    result_path_future, timeout=self.eval_timeout + 30
+                )
+
+            except (
+                ray.exceptions.RayActorError,
+                ray.exceptions.ActorDiedError,
+            ) as e:
+                if used_worker:
+                    _logger.warning(
+                        "Persistent worker %d failed: %s. "
+                        "Retrying via per-task remote.",
+                        worker_idx, e,
+                    )
+                    self._handle_worker_crash(worker_idx)
+                    result_path_future = (
+                        self.exec_fn.options(scheduling_strategy="DEFAULT")
+                        .remote(
+                            code_path,
+                            self.get_program_entrypoint(),
+                            self.num_cpus_per_task,
+                            self.eval_timeout + 5,
+                        )
+                    )
+                    results_path = ray.get(
+                        result_path_future, timeout=self.eval_timeout + 30
+                    )
+                else:
+                    raise
 
             if not results_path:
                 raise RuntimeError("Remote execution returned an empty results path.")
