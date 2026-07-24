@@ -129,10 +129,34 @@ case "${TASK}" in
         export KERNEL_EVAL_GPU=${KERNEL_EVAL_GPU:-0}
         export NUM_EVAL_GPUS=${NUM_EVAL_GPUS:-2}
         export EVAL_GPU_IDS=${EVAL_GPU_IDS:-}
+        # Backward compat: GPU_EVAL_SERVER → EVAL_SERVER_URL
+        if [ -n "${GPU_EVAL_SERVER:-}" ] && [ -z "${EVAL_SERVER_URL:-}" ]; then
+            export EVAL_SERVER_URL="${GPU_EVAL_SERVER}"
+        fi
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.01}
         DATA_FILE=data/gpu_mode_trimul_train.parquet
         EXPERIMENT_TAG="gpu-mode-trimul"
+        ;;
+    mla_decode|mla_decode_nvidia)
+        export DISCOVER_ENV_MODULE=examples.gpu_mode.env
+        export DISCOVER_ENV_CLASS=GpuModeEnv
+        export DISCOVER_PROBLEM_TYPE=mla_decode_nvidia
+        export DISCOVER_PHASE1_MAX_TOKENS=26000
+        export DISCOVER_EVAL_TIMEOUT=530
+        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_DATA_SOURCE=gpu_mode_mla_decode_nvidia
+        export GPU_EVAL_SERVER=${GPU_EVAL_SERVER:-}
+        export KERNEL_EVAL_GPU=${KERNEL_EVAL_GPU:-0}
+        export NUM_EVAL_GPUS=${NUM_EVAL_GPUS:-2}
+        export EVAL_GPU_IDS=${EVAL_GPU_IDS:-}
+        if [ -n "${GPU_EVAL_SERVER:-}" ] && [ -z "${EVAL_SERVER_URL:-}" ]; then
+            export EVAL_SERVER_URL="${GPU_EVAL_SERVER}"
+        fi
+        ACTOR_LR=${ACTOR_LR:-4e-5}
+        KL_COEF=${KL_COEF:-0.01}
+        DATA_FILE=data/gpu_mode_mla_decode_nvidia_train.parquet
+        EXPERIMENT_TAG="gpu-mode-mla-decode-nvidia"
         ;;
     ahc039|ahc)
         export DISCOVER_ENV_MODULE=examples.ahc.env
@@ -149,7 +173,7 @@ case "${TASK}" in
         ;;
     *)
         echo "Unknown task: ${TASK}"
-        echo "Available: circle_packing cp26 cp32 ac1 ac2 erdos denoising gpu_mode ahc039"
+        echo "Available: circle_packing cp26 cp32 ac1 ac2 erdos denoising gpu_mode mla_decode ahc039"
         exit 1
         ;;
 esac

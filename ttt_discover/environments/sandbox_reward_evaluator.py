@@ -1,9 +1,8 @@
 """Sandboxed code evaluator using subprocess isolation.
 
-.. deprecated::
-    Use :class:`ttt_discover.environments.http_eval_client.HttpEvalClient` for
-    unified HTTP-based evaluation across all tasks. This module is retained for
-    backward compatibility with local evaluation setups.
+Used by all CPU tasks (circle_packing, ac_inequalities, erdos, denoising, ahc)
+for local evaluation via subprocess + Ray. GPU tasks (trimul, mla_decode_nvidia)
+use :class:`ttt_discover.environments.http_eval_client.HttpEvalClient` instead.
 """
 import subprocess
 import sys

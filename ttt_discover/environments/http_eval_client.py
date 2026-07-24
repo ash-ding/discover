@@ -1,8 +1,9 @@
-"""Unified HTTP evaluation client for all TTT-Discover tasks.
+"""HTTP evaluation client for GPU tasks (trimul, mla_decode_nvidia).
 
-Routes code evaluation through a centralized HTTP eval server, providing
-consistent error handling, retry logic, and structured diagnostics across
-all 8 tasks.
+Routes GPU kernel evaluation through an HTTP eval server, providing
+consistent error handling, retry logic, and structured diagnostics.
+CPU tasks (circle_packing, ac, erdos, denoising, ahc) use
+SandboxRewardEvaluator instead.
 """
 from __future__ import annotations
 
@@ -18,10 +19,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TASKS = frozenset({
-    "circle_packing", "cp32", "ac1", "ac2",
-    "erdos", "denoising", "gpu_mode", "ahc039",
-})
+SUPPORTED_TASKS = frozenset({"trimul", "mla_decode_nvidia"})
 
 _RETRYABLE_ERROR_TYPES = frozenset({"infra_failure"})
 _NON_RETRYABLE_ERROR_TYPES = frozenset({"eval_failure", "timeout", "compilation_error"})
@@ -46,9 +44,9 @@ class EvalResult:
 
 
 class HttpEvalClient:
-    """HTTP client for the centralized eval server.
+    """HTTP client for GPU kernel evaluation via POST /eval endpoint.
 
-    Supports all 8 TTT-Discover tasks via POST /eval endpoint.
+    Used by GpuModeRewardEvaluator for trimul and mla_decode_nvidia tasks.
     Handles retries on infrastructure failures, validates responses,
     and returns penalty scores when the server is unavailable.
     """

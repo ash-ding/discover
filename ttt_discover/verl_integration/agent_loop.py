@@ -455,10 +455,12 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
 
                 eval_server_url = self._discover_config.get("eval_server_url", "")
                 gpu_eval_server = self._discover_config.get("gpu_eval_server", "")
+                problem_type = self._discover_config.get("problem_type", "")
+                is_gpu_task = problem_type in ("trimul", "mla_decode_nvidia")
 
-                if eval_server_url:
-                    # Layer 2: Unified HTTP evaluation for all tasks
-                    task_name = self._discover_config.get("problem_type", "")
+                if eval_server_url and is_gpu_task:
+                    # Layer 2: HTTP evaluation for GPU tasks only
+                    task_name = problem_type
                     eval_timeout = self._discover_config.get("eval_timeout", 530)
                     score_scale = self._discover_config.get("score_scale", None)
 
@@ -486,7 +488,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                         eval_error = str(eval_result.error or "")[:2000]
                         eval_error_type = eval_result.error_type
 
-                elif gpu_eval_server:
+                elif gpu_eval_server and is_gpu_task:
                     # Legacy GPU-mode-only HTTP eval
                     has_triton = "@triton.jit" in code
                     if has_triton:
