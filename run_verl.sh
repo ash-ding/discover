@@ -31,6 +31,9 @@ export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib/python3.11/site-packages/nvidia/cu13
 # Reduce CUDA memory fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Disable Ray task event telemetry (reduces per-task overhead by 1-2ms)
+export RAY_task_events_report_interval_ms=0
+
 # Multi-node communication: force IPv4 on eth0
 export NCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0

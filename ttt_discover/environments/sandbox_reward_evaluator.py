@@ -10,6 +10,7 @@ import pickle
 import tempfile, os
 import time
 import random
+import logging
 from abc import abstractmethod
 from pathlib import Path
 
@@ -33,6 +34,31 @@ from enum import Enum
 
 from ttt_discover.environments.base_reward_evaluator import BaseRewardEvaluator
 from ttt_discover.environments.utils.cpu_scheduler import CpuScheduler, get_cpu_group, release_cpu_group
+
+_logger = logging.getLogger(__name__)
+
+
+@ray.remote(num_cpus=0)
+class PersistentEvalWorker:
+    """Long-lived Ray actor that runs eval code in subprocesses.
+
+    Eliminates per-eval Ray task scheduling overhead by keeping a warm
+    actor that accepts evaluate() calls.  The subprocess spawn + import
+    overhead is the same as before (the actual sandbox runs in a child
+    process for isolation), but Ray remote-function dispatch is replaced
+    with a cheap actor method call.
+    """
+
+    def __init__(self, num_cpus_per_task: int, task_memory: int):
+        self.num_cpus_per_task = num_cpus_per_task
+        self.task_memory = task_memory
+
+    def evaluate(self, code_path: str, function_name: str,
+                 max_cpus: int, eval_timeout_seconds: int) -> str:
+        """Run evaluation — identical logic to the module-level run_program."""
+        return run_program(
+            code_path, function_name, max_cpus, eval_timeout_seconds,
+        )
 
 
 def run_with_timeout(program_path, function_name: str, timeout_seconds=20, *, cpus: List[int]):
@@ -487,12 +513,10 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Try to get existing actor by name
             _scheduler = ray.get_actor("cpu_scheduler")
-            print("[SandboxRewardEvaluator] Found existing cpu_scheduler actor.")
+            _logger.info("Found existing cpu_scheduler actor.")
         except ValueError:
-            # If not found, create a new one
-            print("[SandboxRewardEvaluator] Creating new cpu_scheduler actor.")
+            _logger.info("Creating new cpu_scheduler actor.")
             _scheduler = CpuScheduler.options(
                 name="cpu_scheduler",
                 lifetime="detached"
@@ -500,6 +524,43 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
                 num_cpus_per_task=self.num_cpus_per_task,
                 num_persistent_workers=0
             )
+
+        # Persistent worker pool (Tier 1.1 optimization)
+        use_persistent = os.environ.get(
+            "PERSISTENT_EVAL_WORKERS", "true"
+        ).lower() in ("true", "1", "yes")
+        self._persistent_workers: list = []
+        self._worker_index = 0
+
+        if use_persistent:
+            try:
+                cluster_cpus = int(ray.cluster_resources().get("CPU", 0))
+                num_workers = max(1, cluster_cpus // max(1, self.num_cpus_per_task))
+                num_workers = min(num_workers, 64)
+                for i in range(num_workers):
+                    name = f"eval_worker_{i}"
+                    try:
+                        w = ray.get_actor(name)
+                    except ValueError:
+                        w = PersistentEvalWorker.options(
+                            lifetime="detached",
+                            name=name,
+                            max_concurrency=4,
+                        ).remote(
+                            num_cpus_per_task=self.num_cpus_per_task,
+                            task_memory=self.TASK_MEMORY,
+                        )
+                    self._persistent_workers.append(w)
+                _logger.info(
+                    "Initialized %d persistent eval workers (cluster has %d CPUs).",
+                    num_workers, cluster_cpus,
+                )
+            except Exception as e:
+                _logger.warning(
+                    "Failed to create persistent workers, falling back to "
+                    "per-task Ray remote functions: %s", e,
+                )
+                self._persistent_workers = []
 
     def preprocess_generation(self, generation, state) -> str:
         import inspect
@@ -549,6 +610,14 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
 
         return result, None
 
+    def _next_worker(self):
+        """Round-robin persistent worker selection."""
+        if not self._persistent_workers:
+            return None
+        worker = self._persistent_workers[self._worker_index % len(self._persistent_workers)]
+        self._worker_index += 1
+        return worker
+
     def run_eval_code(self, code_str: str):
         # Write code to nfs to avoid ray client overload
         tmp_dir = Path(self.log_dir) / "tmp"
@@ -557,8 +626,6 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
         code_path = None
         results_path = None
 
-        # Use a unique name so concurrent tasks don't collide.
-        # NamedTemporaryFile(delete=False) so another process can read it.
         with tempfile.NamedTemporaryFile(
             suffix=".py",
             delete=False,
@@ -568,30 +635,45 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
             code_path = f.name
             f.write(code_str)
 
-        # Compute expected stdout path (matches run_program's logic)
         expected_stdout_path = Path(code_path).with_suffix(".pkl.stdout")
 
         try:
-            result_path_future = (
-                self.exec_fn.options(scheduling_strategy="SPREAD")
-                .remote(
-                    code_path,
-                    self.get_program_entrypoint(),
-                    self.num_cpus_per_task,
-                    self.eval_timeout + 5,  # remote-side timeout
-                )
-            )
+            worker = self._next_worker()
+            if worker is not None:
+                try:
+                    result_path_future = worker.evaluate.remote(
+                        code_path,
+                        self.get_program_entrypoint(),
+                        self.num_cpus_per_task,
+                        self.eval_timeout + 5,
+                    )
+                    results_path = ray.get(
+                        result_path_future, timeout=self.eval_timeout + 30,
+                    )
+                except (ray.exceptions.RayActorError, ray.exceptions.ActorDiedError):
+                    _logger.warning(
+                        "Persistent worker crashed, falling back to per-task remote."
+                    )
+                    worker = None
 
-            # BUG-008: Add client-side timeout to prevent indefinite hangs
-            results_path = ray.get(result_path_future, timeout=self.eval_timeout + 30)
+            if worker is None:
+                # Fallback: per-task Ray remote function (Tier 1.2: DEFAULT scheduling)
+                result_path_future = (
+                    self.exec_fn.options(scheduling_strategy="DEFAULT")
+                    .remote(
+                        code_path,
+                        self.get_program_entrypoint(),
+                        self.num_cpus_per_task,
+                        self.eval_timeout + 5,
+                    )
+                )
+                results_path = ray.get(
+                    result_path_future, timeout=self.eval_timeout + 30,
+                )
 
             if not results_path:
                 raise RuntimeError("Remote execution returned an empty results path.")
 
-            # ---------------------------
-            # 3) Load results locally, always cleanup
-            # ---------------------------
-            # If your remote writes atomically, exists() should be reliable.
             if not os.path.exists(results_path):
                 raise RuntimeError(f"Results file does not exist: {results_path}")
 
@@ -601,11 +683,9 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
             except Exception as e:
                 raise RuntimeError(f"Failed to load results from {results_path}: {e}") from e
 
-            # Convention: remote can return {"error": "..."} for failures
             if isinstance(results, dict) and "error" in results:
                 raise RuntimeError(f"Program execution failed: {results['error']}")
 
-            # Load stdout if available
             stdout_path = str(results_path) + ".stdout"
             try:
                 if os.path.exists(stdout_path):
@@ -619,7 +699,6 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
             return results
 
         except Exception:
-            # On failure, still try to load stdout for debugging
             try:
                 if os.path.exists(expected_stdout_path):
                     with open(expected_stdout_path, "r") as sf:
@@ -629,9 +708,6 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
             raise
 
         finally:
-            # ---------------------------
-            # 4) Always cleanup temp artifacts (best-effort)
-            # ---------------------------
             if code_path is not None:
                 try:
                     os.unlink(code_path)
@@ -644,7 +720,6 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
                 except (FileNotFoundError, OSError):
                     pass
 
-            # Clean up stdout file (use expected path which is always computable)
             try:
                 os.unlink(expected_stdout_path)
             except (FileNotFoundError, OSError):

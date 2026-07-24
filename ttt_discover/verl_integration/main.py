@@ -61,6 +61,7 @@ def main():
 
     # Initialize Ray
     import ray
+    os.environ.setdefault("RAY_task_events_report_interval_ms", "0")
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
 
