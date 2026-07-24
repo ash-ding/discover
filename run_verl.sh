@@ -37,6 +37,9 @@ export GLOO_SOCKET_IFNAME=eth0
 export NCCL_IB_DISABLE=0
 export NCCL_NET_GDR_LEVEL=2
 
+# Disable Ray task event telemetry (unused, saves ~1-2ms per eval)
+export RAY_task_events_report_interval_ms=0
+
 ########################### Task-specific config ###########################
 case "${TASK}" in
     circle_packing|cp|cp26)
