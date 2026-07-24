@@ -73,19 +73,31 @@ def current_host() -> str:
         return socket.gethostname()
 
 def get_cpu_group(scheduler_actor, timeout_s: float | None = None) -> list[int]:
+    """Get a CPU group with exponential backoff on scheduler failures."""
     host = current_host()
 
     start = time.time()
+    backoff = 0.5
+    max_backoff = 10.0
+    consecutive_errors = 0
     while True:
         if timeout_s is not None and (time.time() - start) >= timeout_s:
             raise TimeoutError(f"No CPU group available on {host} within {timeout_s}s.")
-        
-        cpu_group = ray.get(scheduler_actor.get_workers_atomic.remote(host))
-        
+
+        try:
+            cpu_group = ray.get(scheduler_actor.get_workers_atomic.remote(host))
+            consecutive_errors = 0
+        except (ray.exceptions.RayActorError, ray.exceptions.RayTaskError):
+            # BUG-010: Actor died — exponential backoff before retry
+            consecutive_errors += 1
+            wait = min(backoff * (2 ** (consecutive_errors - 1)), max_backoff)
+            time.sleep(wait)
+            continue
+
         if cpu_group is not None:
             return cpu_group
-        
-        time.sleep(1)
+
+        time.sleep(min(backoff, max_backoff))
 
 def release_cpu_group(scheduler_actor, cpu_group: list[int]) -> None:
     host = current_host()
