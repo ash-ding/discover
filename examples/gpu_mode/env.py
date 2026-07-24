@@ -1,10 +1,13 @@
 from pathlib import Path
+import logging
+import math
 import os
 
 from ttt_discover import Environment, BaseRewardEvaluator, State, DiscoverConfig, discover
 
-# Import local evaluator (only local evaluation supported)
 from examples.gpu_mode.local_evaluator import LocalKernelEvaluator
+
+logger = logging.getLogger(__name__)
 
 # Import prompts
 from examples.gpu_mode.prompt import (
@@ -65,6 +68,20 @@ class GpuModeRewardEvaluator(BaseRewardEvaluator):
         self.max_retries = max_retries
         self.use_container = use_container
 
+        eval_server_url = os.getenv("EVAL_SERVER_URL", "") or os.getenv("GPU_EVAL_SERVER", "")
+        self._http_client = None
+        if eval_server_url:
+            try:
+                from ttt_discover.environments.http_eval_client import HttpEvalClient
+                self._http_client = HttpEvalClient(
+                    server_url=eval_server_url,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                )
+                logger.info("GpuModeRewardEvaluator: HTTP eval enabled via %s", eval_server_url)
+            except Exception as e:
+                logger.warning("Failed to initialize HTTP eval client: %s", e)
+
         self.local_evaluator = LocalKernelEvaluator(
             gpu_id=gpu_id,
             timeout=timeout,
@@ -77,6 +94,12 @@ class GpuModeRewardEvaluator(BaseRewardEvaluator):
             return get_gpu_mode_error("Code must contain @triton.jit.")
         if self.problem_type == "trimul" and "identity" in code:
             return get_gpu_mode_error("Identity kernel is not allowed.")
+
+        if self._http_client is not None:
+            result = self._evaluate_http(code)
+            if result is not None:
+                return result
+            logger.warning("HTTP eval unavailable, falling back to local evaluator")
 
         return self._evaluate_local(code)
 
@@ -102,6 +125,57 @@ class GpuModeRewardEvaluator(BaseRewardEvaluator):
             "result_construction": [],
             "stdout": result.get("stdout", ""),
         }
+
+    def _evaluate_http(self, code: str) -> dict | None:
+        """Evaluate via HTTP eval server. Returns None if server unavailable."""
+        try:
+            eval_result = self._http_client.evaluate(
+                code=code,
+                task_name=self.task_name,
+                timeout=self.timeout,
+            )
+
+            if eval_result.error_type == "infra_failure" and not eval_result.success:
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                return None
+
+            if eval_result.success:
+                score_us = eval_result.score_us
+                if not math.isfinite(score_us) or score_us <= 0:
+                    return get_gpu_mode_error(f"Invalid score_us={score_us}")
+                reward = self.score_scale / score_us
+                return {
+                    "reward": float(reward),
+                    "msg": f"Success! Runtime: {score_us:.2f} us",
+                    "correctness": 1.0,
+                    "raw_score": float(score_us),
+                    "result_construction": [],
+                    "stdout": eval_result.logs.get("stdout", ""),
+                    "error_type": None,
+                }
+            else:
+                return {
+                    "reward": 0.0,
+                    "msg": f"Evaluation failed: {eval_result.error}",
+                    "correctness": 0.0,
+                    "raw_score": eval_result.score_us,
+                    "result_construction": [],
+                    "stdout": eval_result.logs.get("stdout", ""),
+                    "error_type": eval_result.error_type,
+                }
+
+        except Exception as e:
+            logger.warning("HTTP eval error: %s", e)
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            return None
 
     def _evaluate_local(self, code: str) -> dict:
         """Evaluate using local GPU (never raises exception)."""

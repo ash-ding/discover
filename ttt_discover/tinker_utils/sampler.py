@@ -1,10 +1,13 @@
 """Centralized sampler creation for all environments."""
 from __future__ import annotations
 from abc import ABC, abstractmethod
+import logging
 import os
 import threading
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from ttt_discover.tinker_utils.state import State, state_from_dict
 from ttt_discover.tinker_utils.best_sequence_utils import _file_lock, _atomic_write_json, _read_json_or_default
@@ -116,8 +119,12 @@ class PUCTSampler(StateSampler):
         self._last_scale: float = 1.0
         self._last_puct_stats: list[tuple[int, float, float, float, float]] = []
         
+        self._children_map_dirty = True
+        self._cached_children_map: dict[str, set[str]] = {}
+
         if resume_step is not None:
             self._load(resume_step)
+            self._validate_loaded_state()
         if not self._states:
             for _ in range(batch_size):
                 state = create_initial_state(self.env_type, self.problem_type)
@@ -129,7 +136,7 @@ class PUCTSampler(StateSampler):
         file_path = _sampler_file_for_step(self.file_path, step)
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Cannot resume from step {step}: sampler file not found: {file_path}")
-        with _file_lock(f"{file_path}.lock"):
+        with _file_lock(self._global_lock_path):
             store = _read_json_or_default(file_path, default=None)
         if store is None:
             raise ValueError(f"Failed to load sampler state from {file_path}")
@@ -139,6 +146,32 @@ class PUCTSampler(StateSampler):
         self._n = store.get("puct_n", {}) or {}
         self._m = store.get("puct_m", {}) or {}
         self._T = int(store.get("puct_T", 0) or 0)
+
+    def _validate_loaded_state(self):
+        """BUG-004: Validate state integrity after loading from disk."""
+        if self._T < 0:
+            logger.warning("PUCT state corruption: T=%d < 0, resetting to 0", self._T)
+            self._T = 0
+        bad_n = [k for k, v in self._n.items() if v < 0 or not np.isfinite(v)]
+        if bad_n:
+            logger.warning("PUCT state corruption: invalid n for %d states, resetting them", len(bad_n))
+            for k in bad_n:
+                self._n[k] = 0
+        bad_m = [k for k, v in self._m.items() if not np.isfinite(v)]
+        if bad_m:
+            logger.warning("PUCT state corruption: non-finite m for %d states, removing them", len(bad_m))
+            for k in bad_m:
+                del self._m[k]
+        bad_states = [s for s in self._states if s.value is not None and not np.isfinite(s.value)]
+        if bad_states:
+            logger.warning("PUCT buffer: %d states with non-finite values, setting to None", len(bad_states))
+            for s in bad_states:
+                s.value = None
+
+    @property
+    def _global_lock_path(self) -> str:
+        """BUG-003: Shared file lock path for checkpoint/flush coordination."""
+        return f"{self.file_path}.global.lock"
 
     def _save(self, step: int):
         save_path = _sampler_file_for_step(self.file_path, step)
@@ -150,7 +183,7 @@ class PUCTSampler(StateSampler):
             "puct_m": self._m,
             "puct_T": self._T,
         }
-        with _file_lock(f"{save_path}.lock"):
+        with _file_lock(self._global_lock_path):
             _atomic_write_json(save_path, store)
 
     def _refresh_random_construction(self, state: State) -> None:
@@ -201,12 +234,17 @@ class PUCTSampler(StateSampler):
         return lineage
 
     def _build_children_map(self) -> dict[str, set[str]]:
+        """BUG-007: Cache children_map, only rebuild when states change."""
+        if not self._children_map_dirty:
+            return self._cached_children_map
         children: dict[str, set[str]] = {}
         for s in self._states:
             for p in (s.parents or []):
                 pid = p.get("id")
                 if pid:
                     children.setdefault(str(pid), set()).add(s.id)
+        self._cached_children_map = children
+        self._children_map_dirty = False
         return children
 
     def _get_full_lineage(self, state: State, children_map: dict[str, set[str]]) -> set[str]:
@@ -286,7 +324,7 @@ class PUCTSampler(StateSampler):
             return
         assert len(states) == len(parent_states)
 
-        # Update PUCT stats for ALL states (count per-rollout, not per-unique-parent)
+        # Compute stat deltas outside the lock (read-only aggregation)
         parent_max: dict[str, float] = {}
         parent_obj: dict[str, State] = {}
         parent_count: dict[str, int] = {}
@@ -298,52 +336,54 @@ class PUCTSampler(StateSampler):
             parent_count[pid] = parent_count.get(pid, 0) + 1
             parent_max[pid] = max(parent_max.get(pid, float("-inf")), float(child.value))
 
-        for pid, y in parent_max.items():
-            self._m[pid] = max(self._m.get(pid, y), y)
-            parent = parent_obj[pid]
-            count = parent_count.get(pid, 1)
-            anc_ids = [pid] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
-            for aid in anc_ids:
-                self._n[aid] = self._n.get(aid, 0) + count
-            self._T += count
-
-        if not states:
-            return
-
-        # Apply topk filter and dedup
+        # Apply topk filter and dedup (reads self._states under lock below)
         states, parent_states = self._filter_topk_per_parent(states, parent_states, self.topk_children)
-        existing = {self._get_construction_key(s) for s in self._states}
-        existing.discard(None)
-        
-        new_states = []
-        for child, parent in zip(states, parent_states):
-            if child.value is None:
-                continue
-            limits = getattr(self.env_type, "construction_length_limits", None)
-            if limits and child.construction:
-                lo, hi = limits
-                if not (lo <= len(child.construction) <= hi):
-                    continue
-            max_len = getattr(self.env_type, "max_construction_len", None)
-            if max_len is not None and child.construction and len(child.construction) > max_len:
-                continue
-            key = self._get_construction_key(child)
-            if key is not None and key in existing:
-                continue
-            self._set_parent_info(child, parent)
-            new_states.append(child)
-            if key is not None:
-                existing.add(key)
 
-        if not new_states:
-            return
         with self._lock:
+            # BUG-001 fix: update PUCT stats inside lock to prevent race conditions
+            for pid, y in parent_max.items():
+                self._m[pid] = max(self._m.get(pid, y), y)
+                parent = parent_obj[pid]
+                count = parent_count.get(pid, 1)
+                anc_ids = [pid] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
+                for aid in anc_ids:
+                    self._n[aid] = self._n.get(aid, 0) + count
+                self._T += count
+
+            self._children_map_dirty = True
+
+            existing = {self._get_construction_key(s) for s in self._states}
+            existing.discard(None)
+
+            new_states = []
+            for child, parent in zip(states, parent_states):
+                if child.value is None:
+                    continue
+                limits = getattr(self.env_type, "construction_length_limits", None)
+                if limits and child.construction:
+                    lo, hi = limits
+                    if not (lo <= len(child.construction) <= hi):
+                        continue
+                max_len = getattr(self.env_type, "max_construction_len", None)
+                if max_len is not None and child.construction and len(child.construction) > max_len:
+                    continue
+                key = self._get_construction_key(child)
+                if key is not None and key in existing:
+                    continue
+                self._set_parent_info(child, parent)
+                new_states.append(child)
+                if key is not None:
+                    existing.add(key)
+
+            if not new_states:
+                return
             self._states.extend(new_states)
             if save:
                 self._finalize_and_save(step)
 
     def _finalize_and_save(self, step: int | None = None):
         if len(self._states) > self.max_buffer_size:
+            before_count = len(self._states)
             actual_values = [s.value if s.value is not None else float('-inf') for s in self._states]
             by_actual = list(np.argsort(actual_values)[::-1])
             initial_ids = {s.id for s in self._initial_states}
@@ -354,6 +394,10 @@ class PUCTSampler(StateSampler):
                     break
                 keep.add(i)
             self._states = [self._states[i] for i in sorted(keep)]
+            dropped = before_count - len(self._states)
+            if dropped > 0:
+                logger.info("PUCT buffer overflow: dropped %d states (%d -> %d)", dropped, before_count, len(self._states))
+            self._children_map_dirty = True
         if step is not None:
             self._current_step = step
         self._save(self._current_step)
@@ -374,13 +418,15 @@ class PUCTSampler(StateSampler):
                     children.sort(key=lambda x: x.value if x.value is not None else float('-inf'), reverse=True)
                     filtered.extend(children[:self.topk_children])
                 self._states = no_parent + filtered
+                self._children_map_dirty = True
             self._finalize_and_save(step)
 
     def record_failed_rollout(self, parent: State):
-        anc_ids = [parent.id] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
-        for aid in anc_ids:
-            self._n[aid] = self._n.get(aid, 0) + 1
-        self._T += 1
+        with self._lock:
+            anc_ids = [parent.id] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
+            for aid in anc_ids:
+                self._n[aid] = self._n.get(aid, 0) + 1
+            self._T += 1
 
     def reload_from_step(self, step: int):
         with self._lock:
@@ -388,6 +434,8 @@ class PUCTSampler(StateSampler):
             self._initial_states = []
             self._current_step = step
             self._load(step)
+            self._validate_loaded_state()
+            self._children_map_dirty = True
             if not self._states:
                 for _ in range(self.batch_size):
                     state = create_initial_state(self.env_type, self.problem_type)

@@ -1,3 +1,9 @@
+"""Sandboxed code evaluator using subprocess isolation.
+
+Used by all CPU tasks (circle_packing, ac_inequalities, erdos, denoising, ahc)
+for local evaluation via subprocess + Ray. GPU tasks (trimul, mla_decode_nvidia)
+use :class:`ttt_discover.environments.http_eval_client.HttpEvalClient` instead.
+"""
 import subprocess
 import sys
 import pickle
@@ -248,10 +254,28 @@ except Exception as e:
         import signal, time, shutil
 
         def _kill_process_tree(p, pgid, hard=False):
-            # Terminate/Kill entire process group + any direct children of p
+            sig = signal.SIGKILL if hard else signal.SIGTERM
+            # BUG-006: Use psutil for recursive process tree cleanup when available
+            try:
+                import psutil
+                parent = psutil.Process(p.pid)
+                children = parent.children(recursive=True)
+                for child in children:
+                    try:
+                        child.send_signal(sig)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                try:
+                    parent.send_signal(sig)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+                return
+            except (ImportError, psutil.NoSuchProcess):
+                pass
+            # Fallback: process group + pkill
             if pgid is not None:
                 try:
-                    os.killpg(pgid, signal.SIGKILL if hard else signal.SIGTERM)
+                    os.killpg(pgid, sig)
                 except Exception:
                     pass
             if shutil.which("pkill"):
@@ -558,8 +582,8 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
                 )
             )
 
-            # Do not set a client timeout here; scheduling can be delayed.
-            results_path = ray.get(result_path_future)
+            # BUG-008: Add client-side timeout to prevent indefinite hangs
+            results_path = ray.get(result_path_future, timeout=self.eval_timeout + 30)
 
             if not results_path:
                 raise RuntimeError("Remote execution returned an empty results path.")

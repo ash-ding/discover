@@ -129,10 +129,34 @@ case "${TASK}" in
         export KERNEL_EVAL_GPU=${KERNEL_EVAL_GPU:-0}
         export NUM_EVAL_GPUS=${NUM_EVAL_GPUS:-2}
         export EVAL_GPU_IDS=${EVAL_GPU_IDS:-}
+        # Backward compat: GPU_EVAL_SERVER → EVAL_SERVER_URL
+        if [ -n "${GPU_EVAL_SERVER:-}" ] && [ -z "${EVAL_SERVER_URL:-}" ]; then
+            export EVAL_SERVER_URL="${GPU_EVAL_SERVER}"
+        fi
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.01}
         DATA_FILE=data/gpu_mode_trimul_train.parquet
         EXPERIMENT_TAG="gpu-mode-trimul"
+        ;;
+    mla_decode|mla_decode_nvidia)
+        export DISCOVER_ENV_MODULE=examples.gpu_mode.env
+        export DISCOVER_ENV_CLASS=GpuModeEnv
+        export DISCOVER_PROBLEM_TYPE=mla_decode_nvidia
+        export DISCOVER_PHASE1_MAX_TOKENS=26000
+        export DISCOVER_EVAL_TIMEOUT=530
+        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_DATA_SOURCE=gpu_mode_mla_decode_nvidia
+        export GPU_EVAL_SERVER=${GPU_EVAL_SERVER:-}
+        export KERNEL_EVAL_GPU=${KERNEL_EVAL_GPU:-0}
+        export NUM_EVAL_GPUS=${NUM_EVAL_GPUS:-2}
+        export EVAL_GPU_IDS=${EVAL_GPU_IDS:-}
+        if [ -n "${GPU_EVAL_SERVER:-}" ] && [ -z "${EVAL_SERVER_URL:-}" ]; then
+            export EVAL_SERVER_URL="${GPU_EVAL_SERVER}"
+        fi
+        ACTOR_LR=${ACTOR_LR:-4e-5}
+        KL_COEF=${KL_COEF:-0.01}
+        DATA_FILE=data/gpu_mode_mla_decode_nvidia_train.parquet
+        EXPERIMENT_TAG="gpu-mode-mla-decode-nvidia"
         ;;
     ahc039|ahc)
         export DISCOVER_ENV_MODULE=examples.ahc.env
@@ -149,7 +173,7 @@ case "${TASK}" in
         ;;
     *)
         echo "Unknown task: ${TASK}"
-        echo "Available: circle_packing cp26 cp32 ac1 ac2 erdos denoising gpu_mode ahc039"
+        echo "Available: circle_packing cp26 cp32 ac1 ac2 erdos denoising gpu_mode mla_decode ahc039"
         exit 1
         ;;
 esac
@@ -185,6 +209,26 @@ if [ -n "$RESUME_DIR" ]; then
     RESUME_MODE="resume_path"
     RESUME_PATH="$RESUME_DIR/latest"
 
+    # BUG-009: Validate FSDP world_size matches current GPU count on resume
+    CURRENT_WORLD_SIZE=$((NGPUS_PER_NODE * NNODES))
+    FSDP_CONFIG="$RESUME_DIR/latest/actor/fsdp_config.json"
+    if [ -f "$FSDP_CONFIG" ]; then
+        SAVED_WORLD_SIZE=$(python3 -c "import json; print(json.load(open('${FSDP_CONFIG}'))['world_size'])" 2>/dev/null || echo "")
+        if [ -n "$SAVED_WORLD_SIZE" ] && [ "$SAVED_WORLD_SIZE" != "$CURRENT_WORLD_SIZE" ]; then
+            echo "WARNING: FSDP world_size mismatch: checkpoint=$SAVED_WORLD_SIZE, current=$CURRENT_WORLD_SIZE"
+            LORA_EXPORT_DIR="$RESUME_DIR/latest/actor/exported_lora"
+            if [ ! -d "$LORA_EXPORT_DIR" ]; then
+                echo "Auto-exporting LoRA adapter for cross-config resume..."
+                python3 scripts/export_lora.py "$RESUME_DIR/latest/actor" || {
+                    echo "ERROR: LoRA export failed. Cannot resume with different world_size."
+                    echo "Run manually: python3 scripts/export_lora.py $RESUME_DIR/latest/actor"
+                    exit 1
+                }
+            fi
+            echo "LoRA adapter exported. Resuming with cross-config resume."
+        fi
+    fi
+
     if [ "$INPLACE" = "true" ]; then
         # Use the resume dir's name as experiment name → results stay in same dir
         EXPERIMENT_NAME=$(basename "$RESUME_DIR")
@@ -205,6 +249,7 @@ fi
 
 export DISCOVER_MAX_MODEL_LEN=${DISCOVER_MAX_MODEL_LEN:-32768}
 export DISCOVER_LOG_DIR=${DISCOVER_LOG_DIR:-./tinker_log}
+export EVAL_SERVER_URL=${EVAL_SERVER_URL:-}
 export DISCOVER_PUCT_FILE_PATH=${DISCOVER_PUCT_FILE_PATH:-./checkpoints/ttt-discover/${EXPERIMENT_NAME}/puct_sampler.json}
 export DISCOVER_PUCT_C=${DISCOVER_PUCT_C:-1.0}
 export DISCOVER_TOPK_CHILDREN=${DISCOVER_TOPK_CHILDREN:-2}
@@ -233,6 +278,7 @@ cat > "$CONFIG_DIR/config_snapshot.json" <<SNAPSHOT_EOF
   "ngpus_per_node": "${NGPUS_PER_NODE:-8}",
   "nnodes": "${NNODES:-1}",
   "gpu_eval_server": "${GPU_EVAL_SERVER:-}",
+  "eval_server_url": "${EVAL_SERVER_URL:-}",
   "discover_env_module": "${DISCOVER_ENV_MODULE}",
   "discover_env_class": "${DISCOVER_ENV_CLASS}",
   "discover_problem_type": "${DISCOVER_PROBLEM_TYPE}",
