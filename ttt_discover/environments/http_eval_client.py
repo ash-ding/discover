@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_TASKS = frozenset({"trimul", "mla_decode_nvidia"})
 
+SERVER_TASK_NAMES = {
+    "mla_decode_nvidia": "mla_decode",
+}
+
 _RETRYABLE_ERROR_TYPES = frozenset({"infra_failure"})
 _NON_RETRYABLE_ERROR_TYPES = frozenset({"eval_failure", "timeout", "compilation_error"})
 
@@ -54,7 +58,7 @@ class HttpEvalClient:
     def __init__(
         self,
         server_url: str | None = None,
-        timeout: int = 3600,
+        timeout: int = 600,
         max_retries: int = 2,
         penalty_score: float = 0.0,
     ):
@@ -87,9 +91,10 @@ class HttpEvalClient:
             EvalResult with success/failure info, score, logs, and timing.
         """
         req_timeout = timeout or self.timeout
+        server_task_name = SERVER_TASK_NAMES.get(task_name, task_name)
         payload: dict[str, Any] = {
             "code": code,
-            "task_name": task_name,
+            "task_name": server_task_name,
             "timeout": req_timeout,
         }
         if extra_params:

@@ -2,7 +2,7 @@
 # Provides isolated environment for running potentially crashing kernel code
 # Compatible with both Podman and Docker
 
-FROM docker.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
+FROM docker.io/nvidia/cuda:12.9.0-devel-ubuntu22.04
 
 # Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -21,11 +21,11 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 &
 # Upgrade pip
 RUN python -m pip install --upgrade pip
 
-# Install PyTorch 2.5.1 with CUDA 12.1 (latest available)
-RUN pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch 2.11.0 with CUDA 12.9
+RUN pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu129
 
-# Install Triton (latest compatible version)
-RUN pip install triton
+# Install Triton 3.6.0
+RUN pip install triton==3.6.0
 
 # Install evaluation dependencies
 RUN pip install \

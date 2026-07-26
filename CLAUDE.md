@@ -113,10 +113,13 @@ For AHC (long prompts), use SP=2 to avoid OOM:
 TOTAL_EPOCHS=50 SP_SIZE=2 bash run_verl.sh ahc039
 ```
 
-For GPU Mode, set the eval server:
+For GPU Mode (trimul or MLA Decode), set the eval server:
 ```bash
 GPU_EVAL_SERVER=http://10.241.128.30:8890 TOTAL_EPOCHS=50 bash run_verl.sh gpu_mode
+GPU_EVAL_SERVER=http://10.241.128.30:8890 TOTAL_EPOCHS=50 bash run_verl.sh mla_decode
 ```
+
+> **Note:** `GPU_EVAL_SERVER` is a backward-compat alias. In `run_verl.sh` it is mapped to `EVAL_SERVER_URL`, which is the variable read by `HttpEvalClient` and `agent_loop.py`. You can set either one.
 
 ### Resume Training
 
@@ -143,6 +146,7 @@ TOTAL_EPOCHS=50 RESUME_DIR=checkpoints/ttt-discover/my-run bash run_verl.sh circ
 | Erdos Min Overlap | `bash run_verl.sh erdos` | `raw_score/min` <= 0.380 | timeout=1100s | [README](examples/erdos_min_overlap/README.md) |
 | Denoising | `bash run_verl.sh denoising` | `raw_score/max` | openproblems patch | [README](examples/denoising/README.md) |
 | GPU Mode (trimul) | `bash run_verl.sh gpu_mode` | `raw_score/min` | eval GPU needed | [README](examples/gpu_mode/README.md) |
+| MLA Decode | `bash run_verl.sh mla_decode` | `raw_score/min` | eval GPU needed | [README](examples/gpu_mode/README.md) |
 | AHC 039 | `SP_SIZE=2 bash run_verl.sh ahc039` | `raw_score/max` | container + SP=2 | [README](examples/ahc/README.md) |
 
 All tasks use the unified `verl_discover` conda environment.
@@ -190,7 +194,7 @@ All variables below can be set before `bash run_verl.sh <task>`. Task-specific d
 | `LORA_RANK` | `32` | LoRA rank and alpha |
 | `ACTOR_LR` | Task-dependent | Learning rate |
 | `KL_COEF` | Task-dependent | KL penalty coefficient |
-| `SAVE_FREQ` | `0` | Checkpoint save frequency (0 = every step) |
+| `SAVE_FREQ` | `0` | Periodic checkpoint save frequency (0 = disabled, only `latest/` saved for resume) |
 
 **PUCT Sampling:**
 
@@ -213,7 +217,10 @@ All variables below can be set before `bash run_verl.sh <task>`. Task-specific d
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `GPU_EVAL_SERVER` | (empty) | HTTP eval server URL for remote evaluation |
+| `GPU_EVAL_SERVER` | (empty) | Backward-compat alias for `EVAL_SERVER_URL` |
+| `EVAL_SERVER_URL` | (empty) | HTTP eval server URL (primary variable; `GPU_EVAL_SERVER` maps to this) |
+| `NUM_EVAL_GPUS` | `2` | Number of GPUs for eval server |
+| `EVAL_GPU_IDS` | (empty) | Specific GPU IDs for eval (e.g., `0,1`) |
 | `KERNEL_EVAL_GPU` | `0` | GPU ID for local kernel evaluation |
 | `KERNEL_EVAL_TIMEOUT` | `1200` | Per-kernel eval timeout (seconds) |
 | `KERNEL_EVAL_RETRIES` | `2` | Eval retry count |
@@ -228,6 +235,8 @@ ttt_discover/
 ├── verl_integration/        # VERL training backend
 │   ├── agent_loop.py        # Custom AgentLoop: PUCT + two-phase completion
 │   ├── verl_reward.py       # Reward function wrapper for sandbox evaluator
+│   ├── reward_function.py   # VERL-compatible reward wrapper
+│   ├── metrics.py           # RL metrics aggregation
 │   ├── discover_trainer.py  # Custom trainer (legacy, for mock testing)
 │   ├── puct_data_source.py  # Dynamic PUCT-driven data source
 │   └── config/              # Task YAML configs
@@ -242,7 +251,8 @@ ttt_discover/
 │   ├── sampler.py           # PUCT state reuse
 │   └── renderers.py         # Qwen3Renderer (prompt formatting)
 └── environments/
-    └── sandbox_reward_evaluator.py  # Ray-based sandboxed code execution
+    ├── sandbox_reward_evaluator.py  # Ray-based sandboxed code execution
+    └── http_eval_client.py          # HTTP client for GPU kernel evaluation
 
 verl/                        # VERL fork with custom extensions
 ├── verl/trainer/ppo/adv_estimators/
@@ -269,7 +279,7 @@ VERL extensions (in `verl/` fork):
 **VERL Colocate (8 GPUs shared)**: All GPUs alternate between inference and training via sleep/wake.
 
 ```
-Inference phase: vLLM TP=4 × 2 replicas (all 8 GPUs, gpu_memory_utilization=0.85)
+Inference phase: vLLM TP=4 × 2 replicas (all 8 GPUs, gpu_memory_utilization=0.5)
 Training phase:  FSDP DP=8 (all 8 GPUs, vLLM sleeps to release memory)
 ```
 

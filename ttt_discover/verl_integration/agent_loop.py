@@ -503,7 +503,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                         max_retries = 1
                         for attempt in range(1 + max_retries):
                             try:
-                                req = urllib.request.Request(f"{eval_url}/", data=payload,
+                                req = urllib.request.Request(f"{eval_url}/eval", data=payload,
                                                              headers={"Content-Type": "application/json"})
                                 result = await asyncio.to_thread(
                                     lambda: json.loads(urllib.request.urlopen(req, timeout=eval_timeout).read())
@@ -555,12 +555,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
 
         output.reward_score = score
         reward_extra = {"acc": float(score > 0)}
-        if eval_error:
-            reward_extra["eval_error"] = eval_error
-        if eval_error_type:
-            reward_extra["error_type"] = eval_error_type
-        if raw_score_us is not None:
-            reward_extra["score_us"] = raw_score_us
+        reward_extra["eval_error"] = eval_error or None
+        reward_extra["error_type"] = eval_error_type
+        reward_extra["score_us"] = raw_score_us
         reward_extra["gen_case"] = gen_case
         reward_extra["p1_len"] = len(p1_tokens)
         reward_extra["p2_len"] = p2_len
