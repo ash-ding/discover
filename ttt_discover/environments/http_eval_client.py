@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import random
 import time
 import urllib.request
 import urllib.error
@@ -51,8 +52,10 @@ class HttpEvalClient:
     """HTTP client for GPU kernel evaluation via POST /eval endpoint.
 
     Used by GpuModeRewardEvaluator for trimul and mla_decode_nvidia tasks.
-    Handles retries on infrastructure failures, validates responses,
-    and returns penalty scores when the server is unavailable.
+    Retries indefinitely on queue-full (HTTP 503) and transient network
+    errors with exponential backoff + jitter, until the server returns a
+    definitive evaluation result (success, eval_failure, timeout, or
+    compilation_error).
     """
 
     def __init__(
@@ -61,6 +64,8 @@ class HttpEvalClient:
         timeout: int = 600,
         max_retries: int = 2,
         penalty_score: float = 0.0,
+        retry_base_delay: float = 5.0,
+        retry_max_delay: float = 60.0,
     ):
         self.server_url = (
             server_url
@@ -69,8 +74,10 @@ class HttpEvalClient:
         if not self.server_url.startswith("http"):
             self.server_url = f"http://{self.server_url}"
         self.timeout = timeout
-        self.max_retries = max_retries
+        self.max_retries = max_retries  # kept for backward compat; unused
         self.penalty_score = penalty_score
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
 
     def evaluate(
         self,
@@ -79,16 +86,11 @@ class HttpEvalClient:
         timeout: int | None = None,
         extra_params: dict | None = None,
     ) -> EvalResult:
-        """Submit code for evaluation and return structured result.
+        """Submit code for evaluation, retrying until a definitive result.
 
-        Args:
-            code: The code to evaluate.
-            task_name: One of the supported task names.
-            timeout: Per-request timeout override (seconds).
-            extra_params: Additional parameters to include in the request payload.
-
-        Returns:
-            EvalResult with success/failure info, score, logs, and timing.
+        Retries indefinitely on queue-full (HTTP 503) and transient errors.
+        Returns immediately when the server produces a real evaluation
+        result — whether success, eval_failure, timeout, or compilation_error.
         """
         req_timeout = timeout or self.timeout
         server_task_name = SERVER_TASK_NAMES.get(task_name, task_name)
@@ -103,8 +105,11 @@ class HttpEvalClient:
         data = json.dumps(payload).encode()
         url = f"{self.server_url}/eval"
 
+        attempt = 0
         last_error: str | None = None
-        for attempt in range(1 + self.max_retries):
+        t_start = time.monotonic()
+
+        while True:
             try:
                 req = urllib.request.Request(
                     url,
@@ -115,35 +120,45 @@ class HttpEvalClient:
                 resp = json.loads(resp_bytes)
                 result = self._parse_response(resp)
 
-                if not result.success and result.is_retryable and attempt < self.max_retries:
-                    logger.warning(
-                        "Eval infra_failure on attempt %d/%d: %s",
-                        attempt + 1, self.max_retries + 1, result.error,
-                    )
-                    time.sleep(2 * (attempt + 1))
-                    continue
+                if not result.is_retryable:
+                    if attempt > 0:
+                        logger.info(
+                            "Eval succeeded after %d retries (%.0fs): task=%s",
+                            attempt, time.monotonic() - t_start, task_name,
+                        )
+                    return result
 
-                return result
+                last_error = result.error
+                self._log_retry(attempt, t_start, last_error)
+                self._backoff_sleep(attempt)
+                attempt += 1
 
             except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
                 last_error = f"{type(e).__name__}: {e}"
-                logger.warning(
-                    "HTTP eval attempt %d/%d failed: %s",
-                    attempt + 1, self.max_retries + 1, last_error,
-                )
-                if attempt < self.max_retries:
-                    time.sleep(2 * (attempt + 1))
-            except (json.JSONDecodeError, ValueError) as e:
-                last_error = f"Response parse error: {e}"
-                logger.error("Eval response parse failed: %s", last_error)
-                break
+                self._log_retry(attempt, t_start, last_error)
+                self._backoff_sleep(attempt)
+                attempt += 1
 
-        return EvalResult(
-            success=False,
-            score_us=self.penalty_score,
-            error=f"Server unavailable after {self.max_retries + 1} attempts: {last_error}",
-            error_type="infra_failure",
-        )
+            except (json.JSONDecodeError, ValueError) as e:
+                return EvalResult(
+                    success=False,
+                    score_us=self.penalty_score,
+                    error=f"Response parse error: {e}",
+                    error_type="infra_failure",
+                )
+
+    def _backoff_sleep(self, attempt: int) -> None:
+        delay = min(self.retry_base_delay * (2 ** min(attempt, 10)), self.retry_max_delay)
+        delay *= 0.5 + random.random()
+        time.sleep(delay)
+
+    def _log_retry(self, attempt: int, t_start: float, last_error: str | None) -> None:
+        elapsed = time.monotonic() - t_start
+        if attempt < 3 or attempt % 5 == 0:
+            logger.warning(
+                "Eval retry attempt %d (%.0fs elapsed): %s",
+                attempt + 1, elapsed, last_error,
+            )
 
     def _parse_response(self, resp: dict) -> EvalResult:
         """Parse and validate the eval server response."""
