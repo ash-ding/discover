@@ -1,65 +1,17 @@
+import logging
 import numpy as np
 
 from ttt_discover import Environment, SandboxRewardEvaluator, State, DiscoverConfig, discover
 
+logger = logging.getLogger(__name__)
 
-def verify_c5_solution(h_values: np.ndarray, c5_achieved: float, n_points: int):
-    if not isinstance(h_values, np.ndarray):
-        try:
-            h_values = np.array(h_values, dtype=np.float64)
-        except (ValueError, TypeError) as e:
-            raise ValueError(f"Cannot convert h_values to numpy array: {e}")
-    
-    if len(h_values.shape) != 1:
-        raise ValueError(f"h_values must be 1D array, got shape {h_values.shape}")
-    
-    if h_values.shape[0] != n_points:
-        raise ValueError(f"Expected h shape ({n_points},), got {h_values.shape}")
-    
-    if not np.all(np.isfinite(h_values)):
-        raise ValueError("h_values contain NaN or inf values")
-    
-    if np.any(h_values < 0) or np.any(h_values > 1):
-        raise ValueError(f"h(x) is not in [0, 1]. Range: [{h_values.min()}, {h_values.max()}]")
-    
-    n = n_points
-    target_sum = n / 2.0
-    current_sum = np.sum(h_values)
-    
-    if current_sum != target_sum:
-        h_values = h_values * (target_sum / current_sum)
-        if np.any(h_values < 0) or np.any(h_values > 1):
-            raise ValueError(f"After normalization, h(x) is not in [0, 1]. Range: [{h_values.min()}, {h_values.max()}]")
-    
+
+C5_MISMATCH_ATOL = 1e-4
+
+
+def compute_c5(h: np.ndarray, n_points: int) -> float:
     dx = 2.0 / n_points
-    
-    j_values = 1.0 - h_values
-    correlation = np.correlate(h_values, j_values, mode="full") * dx
-    computed_c5 = np.max(correlation)
-    
-    if not np.isfinite(computed_c5):
-        raise ValueError(f"Computed C5 is not finite: {computed_c5}")
-    
-    if not np.isclose(computed_c5, c5_achieved, atol=1e-4):
-        raise ValueError(f"C5 mismatch: reported {c5_achieved:.6f}, computed {computed_c5:.6f}")
-    
-    return computed_c5
-
-
-def evaluate_erdos_solution(h_values: np.ndarray, c5_bound: float, n_points: int) -> float:
-    verify_c5_solution(h_values, c5_bound, n_points)
-    return float(c5_bound)
-
-
-def verify_erdos_solution(result: tuple[np.ndarray, float, int]) -> bool:
-    try:
-        h_values, c5_bound, n_points = result
-        c5_bound = evaluate_erdos_solution(h_values, c5_bound, n_points)
-        if c5_bound <= 0 or np.isnan(c5_bound) or np.isinf(c5_bound):
-            return False
-    except Exception:
-        return False
-    return True
+    return float(np.max(np.correlate(h, 1.0 - h, mode="full") * dx))
 
 
 class ErdosMinOverlapRewardEvaluator(SandboxRewardEvaluator):
@@ -67,40 +19,77 @@ class ErdosMinOverlapRewardEvaluator(SandboxRewardEvaluator):
         return "run"
 
     def preprocess_generation(self, generation, state) -> str:
-        import inspect
-        verifier_src = inspect.getsource(verify_c5_solution)
-        numpy_import = "import numpy as np"
-        
-        base = numpy_import + "\n\n" + verifier_src + "\n\n"
-        
-        # State with construction is required - no silent fallback
+        base = "import numpy as np\n\n"
+
         if state is None:
             raise ValueError(
                 "state is required for preprocess_generation. "
                 "Use ExperienceSampler to provide initial state with construction."
             )
         if state.construction is not None:
-            initial_h_values = f"initial_h_values = np.array({list(state.construction)!r})"
-            base += initial_h_values + "\n\n"
+            base += f"initial_h_values = np.array({list(state.construction)!r})\n\n"
 
         return base + generation
 
     def get_reward(self, code: str, state: State) -> float:
         output, error_msg = self.execute_code(code, state)
-        if error_msg: 
+        if error_msg:
             return self._get_failure_entry(error_msg)
 
-        if not verify_erdos_solution(output):
-            return self._get_failure_entry("Invalid solution.")
-        h_values, c5_bound, n_points = output
-        c5_bound = evaluate_erdos_solution(h_values, c5_bound, n_points)
+        try:
+            h_raw, c5_reported, n_points = output
+        except (TypeError, ValueError):
+            return self._get_failure_entry("Output must be (h_values, c5_bound, n_points) tuple.")
+
+        try:
+            h = np.array(h_raw, dtype=np.float64)
+        except (ValueError, TypeError) as e:
+            return self._get_failure_entry(f"Cannot convert h_values to numpy array: {e}")
+
+        if h.ndim != 1 or h.shape[0] != n_points:
+            return self._get_failure_entry(f"Expected 1-D h of length {n_points}, got shape {h.shape}.")
+        if not np.all(np.isfinite(h)):
+            return self._get_failure_entry("h_values contain NaN or inf values.")
+        if np.any(h < 0) or np.any(h > 1):
+            return self._get_failure_entry(f"h(x) not in [0, 1]. Range: [{h.min()}, {h.max()}].")
+
+        raw_c5 = compute_c5(h, n_points)
+        if not np.isfinite(raw_c5):
+            return self._get_failure_entry(f"Computed C5 is not finite: {raw_c5}")
+        if abs(raw_c5 - c5_reported) > C5_MISMATCH_ATOL:
+            return self._get_failure_entry(
+                f"C5 mismatch: reported {c5_reported:.6f}, computed {raw_c5:.6f}."
+            )
+
+        target_sum = n_points / 2.0
+        actual_sum = float(np.sum(h))
+        if actual_sum != target_sum:
+            logger.warning(
+                "Erdos h normalization triggered: sum(h)=%.6f, target=%.1f, diff=%+.6f. "
+                "Model-reported C5=%.10f",
+                actual_sum, target_sum, actual_sum - target_sum, c5_reported,
+            )
+            h = h * (target_sum / actual_sum)
+            if np.any(h < 0) or np.any(h > 1):
+                return self._get_failure_entry(
+                    f"After normalization, h not in [0, 1]. Range: [{h.min()}, {h.max()}]."
+                )
+
+        verified_c5 = compute_c5(h, n_points)
+
+        if verified_c5 > c5_reported + 1e-10:
+            logger.warning(
+                "Erdos C5 degraded after normalization: model-reported=%.10f, "
+                "verified=%.10f, gap=%+.10f",
+                c5_reported, verified_c5, verified_c5 - c5_reported,
+            )
 
         return {
-            "reward": float(1.0 / (1e-8 + c5_bound)),
+            "reward": float(1.0 / (1e-8 + verified_c5)),
             "correctness": 1.0,
-            "raw_score": c5_bound,
-            "msg": f"C5 bound: {c5_bound}",
-            "result_construction": list(h_values),
+            "raw_score": verified_c5,
+            "msg": f"C5 bound: {verified_c5:.10f} (model reported: {c5_reported:.10f})",
+            "result_construction": list(h),
             "stdout": getattr(self, '_last_stdout', ''),
         }
 
@@ -167,6 +156,10 @@ With dx = 2.0 / n_points:
 
 The evaluation computes: C₅ = max(np.correlate(h, 1-h, mode="full") * dx)
 
+**Verification**: The verifier independently recomputes C₅ from your returned h.
+- If the recomputed C₅ differs from your reported value by more than 1e-4, your solution is **rejected**.
+- If `sum(h)` is not exactly `n_points / 2`, the verifier rescales h to enforce the constraint. This rescaling changes C₅ — optimizations that rely on a slightly invalid sum will lose their advantage after correction.
+
 Smaller sequences with less than 1k samples are preferred - they are faster to optimize and evaluate.
 
 **Lower C₅ values are better** - they provide tighter upper bounds on the Erdős constant.
@@ -180,7 +173,7 @@ Smaller sequences with less than 1k samples are preferred - they are faster to o
 - Use scipy, numpy, cvxpy[CBC,CVXOPT,GLOP,GLPK,GUROBI,MOSEK,PDLP,SCIP,XPRESS,ECOS], math
 - Make all helper functions top level, no closures or lambdas
 - No filesystem or network IO
-- `evaluate_erdos_solution()` and `initial_h_values` (an initial construction, if available) are pre-imported
+- `initial_h_values` (the current construction, if available) is pre-imported as a numpy array
 - Your function must complete within budget_s seconds and return the best solution found
 
 **Lower is better**. Current record: C₅ ≤ 0.38092. Our goal is to find a construction that shows C₅ ≤ 0.38080.

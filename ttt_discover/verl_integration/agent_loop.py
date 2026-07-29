@@ -265,14 +265,19 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 successful_parents = []
                 failed_parents = []
 
-                for output, code, score, construction in valid_results:
+                puct_minimize = self._discover_config.get("puct_minimize", False)
+                for output, code, score, construction, raw_score in valid_results:
                     if score > 0 and code:
+                        if raw_score is not None:
+                            puct_value = float(-raw_score if puct_minimize else raw_score)
+                        else:
+                            puct_value = score
                         from ttt_discover.tinker_utils.state import State
                         new_state = State(
                             timestep=state.timestep + 1,
                             construction=construction,
                             code=code,
-                            value=score,
+                            value=puct_value,
                         )
                         successful_states.append(new_state)
                         successful_parents.append(state)
@@ -438,6 +443,8 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         eval_error = ""
         raw_score_us = None
         result_construction = None
+        raw_score_local = None
+        eval_msg = None
         t_eval = time.time()
 
         eval_error_type = None
@@ -538,8 +545,10 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     if isinstance(result, dict):
                         score = float(result.get("score", 0.0))
                         result_construction = result.get("result_construction")
+                        raw_score_local = result.get("raw_score")
+                        eval_msg = result.get("eval_msg", "")
                         if score == 0.0:
-                            eval_error = result.get("eval_msg", "")[:2000]
+                            eval_error = eval_msg[:2000] if eval_msg else ""
                     else:
                         score = float(result)
                         if score == 0.0:
@@ -563,6 +572,10 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         reward_extra["p2_len"] = p2_len
         reward_extra["gen_time_s"] = round(gen_time, 3)
         reward_extra["eval_time_s"] = round(eval_time, 3)
+        reward_extra["code"] = code
+        reward_extra["result_construction"] = result_construction
+        reward_extra["raw_score"] = raw_score_local
+        reward_extra["eval_msg"] = eval_msg
         puct_state = prompt.get("_puct_state")
         if puct_state is not None:
             reward_extra["puct_parent_id"] = getattr(puct_state, "id", None)
@@ -572,7 +585,8 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         # Write to TransferQueue
         await self._write_to_tq(output, prompt, session_id, validate)
 
-        return output, code, score, result_construction
+        raw_score_metric = raw_score_local if raw_score_local is not None else raw_score_us
+        return output, code, score, result_construction, raw_score_metric
 
     async def _write_to_tq(
         self, output: AgentLoopOutput, prompt: dict, session_id: int, validate: bool
@@ -669,6 +683,7 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "log_dir": os.environ.get("DISCOVER_LOG_DIR", "./tinker_log"),
             "data_source": os.environ.get("DISCOVER_DATA_SOURCE", "circle_packing_26"),
             "puct_file_path": os.environ.get("DISCOVER_PUCT_FILE_PATH", "./tinker_log/puct_sampler.json"),
+            "puct_minimize": os.environ.get("DISCOVER_PUCT_MINIMIZE", "").lower() in ("true", "1", "yes"),
             "puct_c": float(os.environ.get("DISCOVER_PUCT_C", "1.0")),
             "topk_children": int(os.environ.get("DISCOVER_TOPK_CHILDREN", "2")),
             "max_buffer_size": int(os.environ.get("DISCOVER_MAX_BUFFER_SIZE", "1000")),
@@ -679,18 +694,31 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
         from ttt_discover.verl_integration.metrics import MetricsAggregator
         self._metrics_aggregator = MetricsAggregator()
 
-        # Load score_scale from env module if available (GPU mode)
+        # Load score_scale and auto-detect optimization direction from env module
         try:
             env_mod = importlib.import_module(self._discover_config["env_module"])
+            env_cls = getattr(env_mod, self._discover_config["env_class"])
             score_scale_map = getattr(env_mod, "SCORE_SCALE", None)
             if score_scale_map and self._discover_config["problem_type"] in score_scale_map:
                 self._discover_config["score_scale"] = score_scale_map[self._discover_config["problem_type"]]
+            if hasattr(env_cls, "is_maximize"):
+                dummy = object.__new__(env_cls)
+                dummy.problem_type = self._discover_config["problem_type"]
+                auto_minimize = not dummy.is_maximize()
+                if self._discover_config["puct_minimize"] != auto_minimize:
+                    logger.info(
+                        "PUCT direction auto-detected from %s.is_maximize(): minimize=%s (overrides env var)",
+                        env_cls.__name__, auto_minimize,
+                    )
+                self._discover_config["puct_minimize"] = auto_minimize
         except Exception:
             pass
 
         logger.info(
-            "DiscoverAgentLoopManagerTQ init: EVAL_SERVER_URL='%s', GPU_EVAL_SERVER='%s', score_scale=%s",
+            "DiscoverAgentLoopManagerTQ init: EVAL_SERVER_URL='%s', GPU_EVAL_SERVER='%s', "
+            "score_scale=%s, puct_minimize=%s",
             eval_server_url, gpu_eval_from_env, self._discover_config.get('score_scale', 'N/A'),
+            self._discover_config.get('puct_minimize', False),
         )
 
         resume_step = self._detect_puct_resume_step()

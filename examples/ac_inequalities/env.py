@@ -287,7 +287,7 @@ Rules:
 Make sure to think and return the final program between ```python and ```.'''
 
         elif self.problem_type == "ac2":
-            return f''''Act as an expert software developer and inequality specialist specializing in creating step functions with certain properties.
+            return f'''Act as an expert software developer and inequality specialist specializing in creating step functions with certain properties.
 
 Your task is to generate the sequence of non-negative heights of a step functions, that maximizes the following evaluation function:
 

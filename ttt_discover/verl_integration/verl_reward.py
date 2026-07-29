@@ -47,7 +47,10 @@ def compute_score(data_source, solution_str, ground_truth=None, extra_info=None,
         reward = float(result.get("reward", 0.0))
         msg = result.get("msg", "")
         return {"score": reward, "eval_msg": msg,
-                "result_construction": result.get("result_construction")}
+                "result_construction": result.get("result_construction"),
+                "raw_score": result.get("raw_score"),
+                "correctness": result.get("correctness"),
+                "stdout": result.get("stdout", "")}
     except Exception as e:
         logger.warning(f"Reward eval failed: {type(e).__name__}: {e}")
         return {"score": 0.0, "eval_msg": f"{type(e).__name__}: {e}"}

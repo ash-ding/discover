@@ -182,6 +182,7 @@ def run_ale_bench_task(
     lite_version: bool = True,
     log_dir: str | None = None,
     num_cpus_per_task: int = 2,
+    eval_timeout: int = 600,
 ) -> dict[str, Any]:
     # Get problem_id from parameter or environment variable
     if problem_id is None:
@@ -290,8 +291,7 @@ def run_ale_bench_task(
             results_path,
         )
 
-        # Wait for results (no timeout to allow for scheduling delays)
-        returned_results_path = ray.get(result_path_future)
+        returned_results_path = ray.get(result_path_future, timeout=eval_timeout + 30)
 
         if not returned_results_path or not os.path.exists(returned_results_path):
             raise RuntimeError(f"Results file does not exist: {returned_results_path}")

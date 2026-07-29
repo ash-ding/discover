@@ -651,10 +651,8 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
                 pass
 
     def _extract_code(self, response):
-        m = re.search(r"```python\s+([\s\S]*?)\s*```", response)
-
-        # Strip out actual python code
-        return m.group(1).strip() if m is not None else None
+        matches = re.findall(r"```python\s+([\s\S]*?)\s*```", response)
+        return matches[-1].strip() if matches else None
 
     def _get_failure_entry(self, msg):
         return dict(

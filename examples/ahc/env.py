@@ -12,6 +12,7 @@ class AhcRewardEvaluator(BaseRewardEvaluator):
     def __init__(self, *args, **kwargs):
         self.problem_type = kwargs.get("problem_type")
         self.log_dir = kwargs.get("log_dir")
+        self.eval_timeout = kwargs.get("eval_timeout", 600)
 
     def _extract_cpp_code(self, text: str) -> str:
         matches = list(self._CPP_PATTERN.finditer(text))
@@ -28,6 +29,7 @@ class AhcRewardEvaluator(BaseRewardEvaluator):
             lite_version=False,
             log_dir=self.log_dir,
             num_cpus_per_task=CPUS_PER_TASK,
+            eval_timeout=self.eval_timeout,
         )
         # If lib returned an error dict, pass it through.
         if "case_results" not in raw:

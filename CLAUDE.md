@@ -93,6 +93,8 @@ export MODEL_PATH=/workspace/home/asherding/models/Qwen3-8B
 
 3. **Always commit code changes after modifying the codebase.** This ensures all changes are tracked and reviewable via git history.
 
+4. **Checkpoint cleanup policy**: When cleaning up checkpoints (whether requested by user or self-initiated), only convert large model weight files to compact LoRA adapters (via `scripts/export_lora.py`), then delete the large weight files. **All other files must be preserved by default** — including rollout logs, PUCT sampler states, WandB records, training logs, and any other non-weight files. Only delete these if the user explicitly confirms forced deletion.
+
 ## Standard Workflow
 
 ```bash
@@ -201,6 +203,7 @@ All variables below can be set before `bash run_verl.sh <task>`. Task-specific d
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DISCOVER_PUCT_C` | `1.0` | PUCT exploration constant |
+| `DISCOVER_PUCT_MINIMIZE` | auto | Auto-detected from env's `is_maximize()`. Manual override: `true`/`false` |
 | `DISCOVER_TOPK_CHILDREN` | `2` | Top-k children in PUCT tree |
 | `DISCOVER_MAX_BUFFER_SIZE` | `1000` | Max PUCT buffer size |
 
