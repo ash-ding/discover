@@ -206,6 +206,7 @@ All variables below can be set before `bash run_verl.sh <task>`. Task-specific d
 | `DISCOVER_PUCT_MINIMIZE` | auto | Auto-detected from env's `is_maximize()`. Manual override: `true`/`false` |
 | `DISCOVER_TOPK_CHILDREN` | `2` | Top-k children in PUCT tree |
 | `DISCOVER_MAX_BUFFER_SIZE` | `1000` | Max PUCT buffer size |
+| `DISCOVER_CODE_LANGUAGE` | `python` | Language for code block extraction (`python`/`cuda`/`cpp`). Auto-set by `run_verl.sh` per task |
 
 **Logging:**
 

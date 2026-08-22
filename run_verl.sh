@@ -125,6 +125,7 @@ case "${TASK}" in
         export DISCOVER_EVAL_TIMEOUT=530
         export DISCOVER_NUM_CPUS_PER_TASK=1
         export DISCOVER_DATA_SOURCE=gpu_mode_trimul
+        export DISCOVER_CODE_LANGUAGE=cuda
         export GPU_EVAL_SERVER=${GPU_EVAL_SERVER:-}
         export KERNEL_EVAL_GPU=${KERNEL_EVAL_GPU:-0}
         export NUM_EVAL_GPUS=${NUM_EVAL_GPUS:-2}
@@ -146,6 +147,7 @@ case "${TASK}" in
         export DISCOVER_EVAL_TIMEOUT=530
         export DISCOVER_NUM_CPUS_PER_TASK=1
         export DISCOVER_DATA_SOURCE=gpu_mode_mla_decode_nvidia
+        export DISCOVER_CODE_LANGUAGE=cuda
         export GPU_EVAL_SERVER=${GPU_EVAL_SERVER:-}
         export KERNEL_EVAL_GPU=${KERNEL_EVAL_GPU:-0}
         export NUM_EVAL_GPUS=${NUM_EVAL_GPUS:-2}
@@ -166,6 +168,7 @@ case "${TASK}" in
         export DISCOVER_EVAL_TIMEOUT=600
         export DISCOVER_NUM_CPUS_PER_TASK=2
         export DISCOVER_DATA_SOURCE=ahc_039
+        export DISCOVER_CODE_LANGUAGE=cpp
         ACTOR_LR=${ACTOR_LR:-2e-5}
         KL_COEF=${KL_COEF:-0.01}
         DATA_FILE=data/ahc_039_train.parquet

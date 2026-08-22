@@ -424,7 +424,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
 
         # Compute reward (run in thread to avoid blocking the async event loop)
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
-        code = self._extract_last_code_block(response_text)
+        code = self._extract_last_code_block(
+            response_text, self._discover_config.get("code_language", "python")
+        )
         score = 0.0
         eval_error = ""
         raw_score_us = None
@@ -636,12 +638,10 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         return False
 
     @staticmethod
-    def _extract_last_code_block(text: str) -> str:
-        """Extract last code block, matching original last_codeblock_postprocess behavior."""
-        languages = ['python', 'cpp', 'java', 'cuda']
-        languages_pattern = '|'.join(re.escape(lang) for lang in languages)
-        codeblock_start = f'```({languages_pattern})'
-        pattern = re.compile(codeblock_start + r'\n(?!```)(.*?)(?:\n```)?(?=\n```|$)', re.DOTALL)
+    def _extract_last_code_block(text: str, language: str = "python") -> str:
+        """Extract last code block for the specified language."""
+        codeblock_start = f'```({re.escape(language)})'
+        pattern = re.compile(codeblock_start + r'\s+(?!```)(.*?)(?:\n```)?(?=\n```|$)', re.DOTALL)
         matches = list(pattern.finditer(text))
         if matches:
             return matches[-1].group(2).rstrip()
@@ -673,6 +673,7 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "puct_c": float(os.environ.get("DISCOVER_PUCT_C", "1.0")),
             "topk_children": int(os.environ.get("DISCOVER_TOPK_CHILDREN", "2")),
             "max_buffer_size": int(os.environ.get("DISCOVER_MAX_BUFFER_SIZE", "1000")),
+            "code_language": os.environ.get("DISCOVER_CODE_LANGUAGE", "python"),
             "gpu_eval_server": gpu_eval_from_env,
             "eval_server_url": eval_server_url,
         }

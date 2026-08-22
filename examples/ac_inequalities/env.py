@@ -212,13 +212,13 @@ class AutoCorrInequalityEnv(Environment):
             from examples.ac_inequalities.env import evaluate_sequence_ac1
             from examples.ac_inequalities.prompt import example_ae_program_random_init
             initial_value = -evaluate_sequence_ac1(construction)
-            code = "```python\n" + example_ae_program_random_init(1000) + "\n```"
+            code = example_ae_program_random_init(1000)
             return State(timestep=-1, construction=construction, code=code, value=initial_value)
         elif problem_type == "ac2":
             from examples.ac_inequalities.env import evaluate_sequence_ac2
             from examples.ac_inequalities.prompt import thetaevolve_initial_program_prev_init
             initial_value = evaluate_sequence_ac2(construction)
-            code = "```python\n" + thetaevolve_initial_program_prev_init + "\n```"
+            code = thetaevolve_initial_program_prev_init
             return State(timestep=-1, construction=construction, code=code, value=initial_value)
         raise ValueError(f"Unknown problem_type: {problem_type}")
 
