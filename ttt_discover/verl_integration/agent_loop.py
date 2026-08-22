@@ -75,22 +75,11 @@ class PUCTSamplerActor:
             self._step = step
         self.sampler.update_states(states, parent_states, save=True, step=self._step)
 
-    def record_failed_rollouts(self, parent_states, step=None):
-        """Record failed rollouts to increment visit counts without adding children.
-
-        Falls back to updating with empty children if record_failed_rollout
-        is not available on the sampler.
-        """
+    def record_expansion(self, parent, step=None):
+        """Record one expansion event for a parent (per-parent counting)."""
         if step is not None:
             self._step = step
-        for parent in parent_states:
-            if hasattr(self.sampler, 'record_failed_rollout'):
-                self.sampler.record_failed_rollout(parent)
-            elif hasattr(self.sampler, '_n'):
-                pid = parent.id
-                if pid in self.sampler._n:
-                    self.sampler._n[pid] += 1
-                    self.sampler._T += 1
+        self.sampler.record_expansion(parent)
 
     def flush(self, step):
         self.sampler.flush(step=step)
@@ -263,7 +252,6 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                 global_steps = prompt.get("global_steps", 0)
                 successful_states = []
                 successful_parents = []
-                failed_parents = []
 
                 puct_minimize = self._discover_config.get("puct_minimize", False)
                 for output, code, score, construction, raw_score in valid_results:
@@ -281,22 +269,20 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                         )
                         successful_states.append(new_state)
                         successful_parents.append(state)
-                    else:
-                        failed_parents.append(state)
 
+                # Per-parent counting: one expansion event per parent (Appendix A.2)
+                ray.get(self._puct_actor.record_expansion.remote(
+                    state, step=global_steps
+                ))
                 if successful_states:
                     ray.get(self._puct_actor.update_states.remote(
                         successful_states, successful_parents, step=global_steps
-                    ))
-                if failed_parents:
-                    ray.get(self._puct_actor.record_failed_rollouts.remote(
-                        failed_parents, step=global_steps
                     ))
 
                 logger.info(
                     f"Prompt {uid} rollout summary: "
                     f"total={len(results)}, valid={len(valid_results)}, errors={error_count}, "
-                    f"success={len(successful_states)}, failed={len(failed_parents)}"
+                    f"success={len(successful_states)}"
                 )
 
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})

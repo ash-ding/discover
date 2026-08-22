@@ -324,31 +324,20 @@ class PUCTSampler(StateSampler):
             return
         assert len(states) == len(parent_states)
 
-        # Compute stat deltas outside the lock (read-only aggregation)
+        # Compute best child value per parent (for m update)
         parent_max: dict[str, float] = {}
-        parent_obj: dict[str, State] = {}
-        parent_count: dict[str, int] = {}
         for child, parent in zip(states, parent_states):
             if child.value is None:
                 continue
             pid = parent.id
-            parent_obj[pid] = parent
-            parent_count[pid] = parent_count.get(pid, 0) + 1
             parent_max[pid] = max(parent_max.get(pid, float("-inf")), float(child.value))
 
         # Apply topk filter and dedup (reads self._states under lock below)
         states, parent_states = self._filter_topk_per_parent(states, parent_states, self.topk_children)
 
         with self._lock:
-            # BUG-001 fix: update PUCT stats inside lock to prevent race conditions
             for pid, y in parent_max.items():
                 self._m[pid] = max(self._m.get(pid, y), y)
-                parent = parent_obj[pid]
-                count = parent_count.get(pid, 1)
-                anc_ids = [pid] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
-                for aid in anc_ids:
-                    self._n[aid] = self._n.get(aid, 0) + count
-                self._T += count
 
             self._children_map_dirty = True
 
@@ -421,7 +410,12 @@ class PUCTSampler(StateSampler):
                 self._children_map_dirty = True
             self._finalize_and_save(step)
 
-    def record_failed_rollout(self, parent: State):
+    def record_expansion(self, parent: State):
+        """Record one expansion event for parent per Appendix A.2.
+
+        Increments n(a) += 1 for a in {parent} union Anc(parent), and T += 1.
+        Called exactly once per parent per expansion, regardless of child count.
+        """
         with self._lock:
             anc_ids = [parent.id] + [str(p["id"]) for p in (parent.parents or []) if p.get("id")]
             for aid in anc_ids:
