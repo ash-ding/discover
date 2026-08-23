@@ -13,7 +13,24 @@
 # Core: vLLM + PyTorch
 # ============================================================================
 --extra-index-url https://download.pytorch.org/whl/cu129
-vllm>=0.22.0,<=0.23.0
+
+# !! vLLM MUST be the +cu129 build published as a GitHub release asset. !!
+#
+# The PyPI wheel carrying the SAME version number ships a FlashAttention-3
+# binary compiled for sm_90 instead of sm_90a. Without the 'a' suffix the
+# Hopper wgmma/TMA instruction paths are compiled out and H100 decode
+# throughput collapses ~7x.
+#   measured on Qwen3-1.7B, TP=1, 64 concurrent seqs:
+#     PyPI wheel   (FA3 = sm_90 )    844 tok/s   75.8 ms/step
+#     this wheel   (FA3 = sm_90a)   6121 tok/s   10.5 ms/step
+#
+# The --extra-index-url above does NOT protect against this: the PyTorch
+# index carries no vllm package at all, so a plain 'vllm>=0.22,<=0.23'
+# always resolves from PyPI. The +cu129 build exists ONLY as a GitHub
+# release asset and is not on any pip index. Pin the exact wheel.
+#
+# Verify after installing:  python scripts/check_vllm_build.py
+vllm @ https://github.com/vllm-project/vllm/releases/download/v0.23.0/vllm-0.23.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
 
 # PEFT and Transformers
 peft>=0.19

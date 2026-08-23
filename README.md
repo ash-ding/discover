@@ -18,7 +18,13 @@ conda create -n verl_discover python=3.11 -y
 conda activate verl_discover
 
 # 2. Install base dependencies
+#    NOTE: this pins the vLLM +cu129 GitHub-release wheel on purpose.
+#    The PyPI wheel of the same version is ~7x slower on H100 -- see the
+#    comment in requirements/requirements-base.txt before changing it.
 pip install -r requirements/requirements-base.txt
+
+# 2b. Verify the vLLM build (fails loudly if the wrong wheel got installed)
+python scripts/check_vllm_build.py
 
 # 3. Install FlashInfer
 pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/

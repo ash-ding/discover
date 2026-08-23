@@ -16,6 +16,7 @@ cd discover
 conda create -n verl_discover python=3.11 -y
 conda activate verl_discover
 pip install -r requirements/requirements-base.txt
+python scripts/check_vllm_build.py   # verify vLLM +cu129 build
 pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/
 MAX_JOBS=8 pip install flash-attn --no-build-isolation --no-cache-dir
 pip install -e verl
@@ -50,6 +51,7 @@ All tasks use a single unified conda environment `verl_discover`:
 conda create -n verl_discover python=3.11 -y
 conda activate verl_discover
 pip install -r requirements/requirements-base.txt
+python scripts/check_vllm_build.py   # verify vLLM +cu129 build
 pip install flashinfer-python -i https://flashinfer.ai/whl/cu129/torch2.11/
 MAX_JOBS=8 pip install flash-attn --no-build-isolation --no-cache-dir
 pip install -e verl
