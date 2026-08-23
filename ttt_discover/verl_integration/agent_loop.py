@@ -99,6 +99,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         tq.init()
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=64))
         self.background_tasks = set()
         self._tokenizer = None
         self._renderer = None
