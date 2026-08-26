@@ -117,6 +117,12 @@ class ErdosMinOverlapEnv(Environment):
 
     def get_question(self) -> str:
         state = self.initial_state
+
+        # Wall-clock budget advertised to the model. MUST stay below eval_timeout:
+        # eval_timeout is the hard kill line (the harness SIGKILLs at eval_timeout+5),
+        # not spendable budget. Leave headroom for process spawn, result pickling and
+        # the verifier. Kept in sync with the run(budget_s=...) signature in ## Rules.
+        budget_s = min(1000, max(1, int(self.eval_timeout) - 100))
         state_ctx = state.to_prompt(0.3808, metric_name="C₅ bound", maximize=False)
         
         # Construct construction section
@@ -165,11 +171,11 @@ Smaller sequences with less than 1k samples are preferred - they are faster to o
 **Lower C₅ values are better** - they provide tighter upper bounds on the Erdős constant.
 
 ## Budget & Resources
-- **Time budget**: {self.eval_timeout}s for your code to run
+- **Time budget**: {budget_s}s for your code to run
 - **CPUs**: {self.num_cpus_per_task} available
 
 ## Rules
-- Define `run(seed=42, budget_s=1000, **kwargs)` that returns `(h_values, c5_bound, n_points)`
+- Define `run(seed=42, budget_s={budget_s}, **kwargs)` that returns `(h_values, c5_bound, n_points)`
 - Use scipy, numpy, cvxpy[CBC,CVXOPT,GLOP,GLPK,GUROBI,MOSEK,PDLP,SCIP,XPRESS,ECOS], math
 - Make all helper functions top level, no closures or lambdas
 - No filesystem or network IO
