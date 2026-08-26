@@ -5,9 +5,15 @@ for local evaluation via subprocess + Ray. GPU tasks (trimul, mla_decode_nvidia)
 use :class:`ttt_discover.environments.http_eval_client.HttpEvalClient` instead.
 """
 import subprocess
+import shutil
 import sys
 import pickle
 import tempfile, os
+
+# --- stdout/stderr 容量上限（防止模型生成的死循环程序写爆磁盘）---
+# 子进程输出直接落盘，父进程按此上限做看门狗；超限即杀，不影响其它文件。
+STDOUT_CAP_BYTES = int(os.environ.get("DISCOVER_STDOUT_CAP_BYTES", 8 * 1024 * 1024))
+STDOUT_POLL_SECONDS = float(os.environ.get("DISCOVER_STDOUT_POLL_SECONDS", "0.2"))
 import time
 import random
 from abc import abstractmethod
@@ -287,14 +293,37 @@ except Exception as e:
                 except Exception:
                     pass
 
-        # Start subprocess in its own session/process group
-        process = subprocess.Popen(
-            [sys.executable, temp_file_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-        )
+        # Start subprocess in its own session/process group.
+        # stdout/stderr 直接重定向到文件：不经过管道 → 不占父进程内存，也不会因管道写满而死锁。
+        stdout_path = program_path + ".stdout"
+        stderr_path = program_path + ".stderr"
+        _out_f = open(stdout_path, "wb")
+        _err_f = open(stderr_path, "wb")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, temp_file_path],
+                stdout=_out_f,
+                stderr=_err_f,
+                env=env,
+                start_new_session=True,
+            )
+        finally:
+            # 子进程已继承 fd，父进程这两个可以立刻关掉
+            _out_f.close()
+            _err_f.close()
+
+        def _sizeof(p):
+            try:
+                return os.path.getsize(p)
+            except OSError:
+                return 0
+
+        def _read_capped(p, cap=STDOUT_CAP_BYTES):
+            try:
+                with open(p, "rb") as f:
+                    return f.read(cap)
+            except OSError:
+                return b""
 
         try:
             # Capture PGID (may fail if it exits immediately)
@@ -303,7 +332,46 @@ except Exception as e:
             except Exception:
                 _pgid = None
 
-            _stdout, _stderr = process.communicate(timeout=timeout_seconds)
+            # --- 看门狗：同时盯住超时和输出大小 ---
+            _deadline = time.monotonic() + timeout_seconds
+            _killed_for_size = False
+            while process.poll() is None:
+                if _sizeof(stdout_path) + _sizeof(stderr_path) > STDOUT_CAP_BYTES:
+                    _killed_for_size = True
+                    break
+                if time.monotonic() >= _deadline:
+                    raise subprocess.TimeoutExpired(
+                        getattr(process, "args", temp_file_path), timeout_seconds
+                    )
+                time.sleep(STDOUT_POLL_SECONDS)
+
+            if _killed_for_size:
+                _elapsed = timeout_seconds - max(0.0, _deadline - time.monotonic())
+                _kill_process_tree(process, _pgid, hard=False)
+                try:
+                    process.wait(timeout=1.0)
+                except Exception:
+                    pass
+                _kill_process_tree(process, _pgid, hard=True)
+                try:
+                    process.wait(timeout=0.5)
+                except Exception:
+                    pass
+                # 截断到上限，保留开头便于诊断
+                try:
+                    os.truncate(stdout_path, STDOUT_CAP_BYTES)
+                    with open(stdout_path, "ab") as sf:
+                        sf.write(
+                            b"\n...[truncated: exceeded DISCOVER_STDOUT_CAP_BYTES=%d]...\n"
+                            % STDOUT_CAP_BYTES
+                        )
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    "Program exceeded output limit of %d bytes after %.1fs "
+                    "(likely an unbounded print loop)" % (STDOUT_CAP_BYTES, _elapsed)
+                )
+
             exit_code = process.returncode
 
             # Soft sweep first (gives atexit a chance), then hard sweep:
@@ -314,15 +382,8 @@ except Exception as e:
                 pass
             _kill_process_tree(process, _pgid, hard=True)
 
-            # Always write stdout for debugging (even on error/failure)
-            stdout_path = program_path + ".stdout"
-            try:
-                with open(stdout_path, "w") as sf:
-                    sf.write(_stdout.decode(errors="ignore"))
-            except Exception:
-                pass
-
             if exit_code != 0:
+                _stderr = _read_capped(stderr_path)
                 if _stderr:
                     # Surface child stderr to your logs if useful
                     sys.stderr.write(_stderr.decode(errors="ignore"))
@@ -357,6 +418,11 @@ except Exception as e:
 
     finally:
         # Cleanup temp files
+        try:
+            if os.path.exists(program_path + ".stderr"):
+                os.unlink(program_path + ".stderr")
+        except OSError:
+            pass
         try:
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
@@ -407,11 +473,10 @@ def run_program(program_code_path, function_name, max_cpus, eval_timeout_seconds
             pickle.dump(result, f)
 
         # Copy stdout file to results location if it exists
-        if os.path.exists(stdout_src):
+        # 补丁 D: 只有非空 stdout 才留存，避免海量 0 字节文件堆积
+        if os.path.exists(stdout_src) and os.path.getsize(stdout_src) > 0:
             try:
-                with open(stdout_src, "r") as sf:
-                    with open(stdout_dst, "w") as df:
-                        df.write(sf.read())
+                shutil.copyfile(stdout_src, stdout_dst)
             except Exception:
                 pass
 
@@ -419,11 +484,10 @@ def run_program(program_code_path, function_name, max_cpus, eval_timeout_seconds
 
     except Exception:
         # On failure, still copy stdout if available (useful for debugging)
-        if os.path.exists(stdout_src):
+        # 补丁 D: 只有非空 stdout 才留存，避免海量 0 字节文件堆积
+        if os.path.exists(stdout_src) and os.path.getsize(stdout_src) > 0:
             try:
-                with open(stdout_src, "r") as sf:
-                    with open(stdout_dst, "w") as df:
-                        df.write(sf.read())
+                shutil.copyfile(stdout_src, stdout_dst)
             except Exception:
                 pass
         raise
