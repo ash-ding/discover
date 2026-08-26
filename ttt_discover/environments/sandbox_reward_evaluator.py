@@ -435,8 +435,28 @@ except Exception as e:
             pass
 
 
+# Sidecar file written by run_program when service begins; read by
+# run_eval_code to distinguish queue time from service time.
+SERVICE_STAMP_SUFFIX = ".started"
+
+# How long a task may sit in ray's scheduling queue before we give up on it.
+# Generous on purpose: a full step submits far more evals than there are CPU
+# groups, so long queues are expected and are NOT a failure.
+MAX_QUEUE_WAIT_MULTIPLIER = 8
+
+
 def run_program(program_code_path, function_name, max_cpus, eval_timeout_seconds):
     program_code_path = Path(program_code_path)
+
+    # Stamp the moment this task starts being SERVED (i.e. a ray worker picked
+    # it up), so the caller can exclude scheduling-queue time from the eval
+    # budget. Everything downstream of here -- get_cpu_group and
+    # run_with_timeout -- is already bounded remote-side. Best-effort: if the
+    # stamp cannot be written the caller falls back to timing from submission.
+    try:
+        program_code_path.with_suffix(SERVICE_STAMP_SUFFIX).write_text(str(time.time()))
+    except OSError:
+        pass
 
     # Load in the code, do this to avoid overloading ray client
     with open(program_code_path, "r") as f:
@@ -634,6 +654,7 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
 
         # Compute expected stdout path (matches run_program's logic)
         expected_stdout_path = Path(code_path).with_suffix(".pkl.stdout")
+        service_stamp_path = Path(code_path).with_suffix(SERVICE_STAMP_SUFFIX)
 
         try:
             result_path_future = (
@@ -646,8 +667,40 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
                 )
             )
 
-            # BUG-008: Add client-side timeout to prevent indefinite hangs
-            results_path = ray.get(result_path_future, timeout=self.eval_timeout + 30)
+            # BUG-008: bound the wait so a wedged task cannot hang us forever.
+            #
+            # The budget must be measured from when the task starts being
+            # SERVED, not from submission. A step submits ~rollout_n *
+            # batch_size evals at once while only len(cpu_groups) can run, so
+            # most tasks sit in ray's scheduling queue first. Charging that
+            # queue time against the eval budget made queued-but-healthy evals
+            # fail: they were reported as timeouts and scored fail_score,
+            # turning scheduling pressure into a fake training signal.
+            #
+            # run_program stamps its start time; poll until it appears, then
+            # enforce the budget from that instant. A task that never gets
+            # scheduled is still bounded by MAX_QUEUE_WAIT_MULTIPLIER.
+            service_budget = self.eval_timeout + 30
+            max_queue_wait = self.eval_timeout * MAX_QUEUE_WAIT_MULTIPLIER
+            poll_interval = min(10.0, max(1.0, service_budget / 60.0))
+            submitted_at = time.time()
+            service_started_at = None
+            while True:
+                try:
+                    results_path = ray.get(result_path_future, timeout=poll_interval)
+                    break
+                except ray.exceptions.GetTimeoutError:
+                    if service_started_at is None:
+                        try:
+                            service_started_at = float(service_stamp_path.read_text())
+                        except (OSError, ValueError):
+                            service_started_at = None
+                    now = time.time()
+                    if service_started_at is not None:
+                        if now - service_started_at > service_budget:
+                            raise
+                    elif now - submitted_at > max_queue_wait:
+                        raise
 
             if not results_path:
                 raise RuntimeError("Remote execution returned an empty results path.")
@@ -711,6 +764,11 @@ class SandboxRewardEvaluator(BaseRewardEvaluator):
             # Clean up stdout file (use expected path which is always computable)
             try:
                 os.unlink(expected_stdout_path)
+            except (FileNotFoundError, OSError):
+                pass
+
+            try:
+                os.unlink(service_stamp_path)
             except (FileNotFoundError, OSError):
                 pass
 
