@@ -1,8 +1,15 @@
 """Sandboxed code evaluator using subprocess isolation.
 
-Used by all CPU tasks (circle_packing, ac_inequalities, erdos, denoising, ahc)
-for local evaluation via subprocess + Ray. GPU tasks (trimul, mla_decode_nvidia)
-use :class:`ttt_discover.environments.http_eval_client.HttpEvalClient` instead.
+Used by circle_packing, ac_inequalities, erdos_min_overlap and denoising for
+local evaluation via subprocess + Ray.
+
+Two task families do NOT go through here:
+
+* GPU tasks (trimul, mla_decode_nvidia) evaluate over HTTP via
+  :class:`ttt_discover.environments.http_eval_client.HttpEvalClient`.
+* ahc subclasses :class:`~ttt_discover.environments.base_reward_evaluator.BaseRewardEvaluator`
+  directly and runs its own ale_bench C++ judge
+  (:func:`examples.ahc.lib.eval_task.run_ale_bench_task`).
 """
 import subprocess
 import shutil
