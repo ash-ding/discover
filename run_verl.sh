@@ -196,6 +196,8 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-28672}
 LORA_RANK=${LORA_RANK:-32}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
+# CUDA graph: False 可显著提速解码, True 为历史默认值
+ENFORCE_EAGER=${ENFORCE_EAGER:-True}
 SP_SIZE=${SP_SIZE:-1}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-32768}
 
@@ -341,7 +343,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=4096 \
-    actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.rollout.enforce_eager=${ENFORCE_EAGER} \
     "+actor_rollout_ref.rollout.agent.agent_loop_manager_class=ttt_discover.verl_integration.agent_loop.DiscoverAgentLoopManagerTQ" \
     \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
