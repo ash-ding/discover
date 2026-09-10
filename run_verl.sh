@@ -198,6 +198,13 @@ ROLLOUT_TP=${ROLLOUT_TP:-4}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
 # CUDA graph: False 可显著提速解码, True 为历史默认值
 ENFORCE_EAGER=${ENFORCE_EAGER:-True}
+# Gradient clipping. cdde043 set this to 1e9 (disabled) citing the paper, but
+# the reference implementation clips at 1.0 (local_backend/training_client.py
+# called clip_grad_norm_(max_norm=1.0)), and the run that reproduced the
+# published Erdos number used grad_clip=1.0. Default is left at 1e9 so this
+# change is behaviour-preserving; set GRAD_CLIP=1.0 to restore clipping.
+GRAD_CLIP=${GRAD_CLIP:-1e9}
+
 SP_SIZE=${SP_SIZE:-1}
 PPO_MAX_TOKEN_LEN_PER_GPU=${PPO_MAX_TOKEN_LEN_PER_GPU:-32768}
 
@@ -276,6 +283,7 @@ cat > "$CONFIG_DIR/config_snapshot.json" <<SNAPSHOT_EOF
   "train_batch_size": "${TRAIN_BATCH_SIZE}",
   "lora_rank": "${LORA_RANK}",
   "actor_lr": "${ACTOR_LR}",
+  "grad_clip": "${GRAD_CLIP}",
   "kl_coef": "${KL_COEF}",
   "sp_size": "${SP_SIZE:-1}",
   "rollout_tp": "${ROLLOUT_TP:-4}",
@@ -321,7 +329,7 @@ python3 -m verl.trainer.main_ppo \
     \
     actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
     "actor_rollout_ref.actor.optim.betas=[0.9,0.95]" \
-    actor_rollout_ref.actor.grad_clip=1e9 \
+    actor_rollout_ref.actor.grad_clip=${GRAD_CLIP} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE} \
     actor_rollout_ref.actor.clip_ratio=1000.0 \
     actor_rollout_ref.actor.clip_ratio_low=1000.0 \
