@@ -47,14 +47,35 @@ try:
 except Exception: print('n/a')
 " 2>/dev/null)
 
-VERDICT=OK
-[ "$REPLICAS" -lt "$EXPECTED" ] && VERDICT="REPLICAS_DOWN_${REPLICAS}of${EXPECTED}"
-[ "$REPLICAS" -eq 0 ]  && VERDICT="ALL_REPLICAS_DOWN"
-[ "$PROC" -eq 0 ]      && VERDICT="LOOP_DEAD"
-[ "$TMUX_OK" -eq 0 ]   && VERDICT="TMUX_GONE"
-[ "$LOG_AGE" -gt 45 ]  && VERDICT="LOG_STALE_${LOG_AGE}min"
-[ "$STALL" -ge 12 ]    && VERDICT="NO_PROGRESS_${STALL}x10min"
-[ "$STEP" -ge 50 ]     && VERDICT=COMPLETE
+# Stall threshold scales with the run's own measured step time. A flat 12
+# ticks (2h) was fine at 1.0h/step, but cp26's steps grew 37min -> 113min as
+# the PUCT tree deepened; the same growth on erdos would trip a fixed 2h and
+# false-alarm a healthy run, exactly as it did for ac1 on lumen3.
+STALL_LIMIT=$(python3 - "$D" <<'PYEOF2' 2>/dev/null
+import json, os, sys
+try:
+    rows = [json.loads(l) for l in open(os.path.join(sys.argv[1], "metrics.jsonl")) if l.strip()]
+    t = [r.get("elapsed_s") for r in rows[-3:]]
+    t = [x for x in t if isinstance(x, (int, float)) and x > 0]
+    print(max(12, int(3 * max(t) / 600)) if t else 12)
+except Exception:
+    print(12)
+PYEOF2
+)
+STALL_LIMIT=${STALL_LIMIT:-12}
+
+# Priority order. These were flat sequential assignments, so COMPLETE (last)
+# could mask LOOP_DEAD / ALL_REPLICAS_DOWN -- a crashed run at step 50 would
+# have reported as finished. Most authoritative signal wins.
+if   [ "$PROC" -eq 0 ];                then VERDICT="LOOP_DEAD"
+elif [ "$TMUX_OK" -eq 0 ];             then VERDICT="TMUX_GONE"
+elif [ "$REPLICAS" -eq 0 ];            then VERDICT="ALL_REPLICAS_DOWN"
+elif [ "$REPLICAS" -lt "$EXPECTED" ];  then VERDICT="REPLICAS_DOWN_${REPLICAS}of${EXPECTED}"
+elif [ "$STEP" -ge 50 ];               then VERDICT="COMPLETE"
+elif [ "$STALL" -ge "$STALL_LIMIT" ];  then VERDICT="NO_PROGRESS_${STALL}x10min"
+elif [ "$LOG_AGE" -gt 45 ];            then VERDICT="LOG_STALE_${LOG_AGE}min"
+else VERDICT="OK"
+fi
 
 echo "[$TS] $VERDICT exp=$EXP step=$STEP/50 best=$BEST replicas=$REPLICAS/$EXPECTED loop=$PROC log_age=${LOG_AGE}m stall=$STALL" >> "$LOG"
 echo "$VERDICT exp=$EXP step=$STEP/50 best=$BEST replicas=$REPLICAS/$EXPECTED updated=$TS" > "$STATUS"
