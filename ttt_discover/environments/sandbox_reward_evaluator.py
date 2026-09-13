@@ -307,8 +307,27 @@ except Exception as e:
         _out_f = open(stdout_path, "wb")
         _err_f = open(stderr_path, "wb")
         try:
+            # Optional address-space cap for the child. LLM-authored programs
+            # occasionally allocate without bound: two of them took 375GB each
+            # and OOM-killed a 1.5TB host 27 steps into an Erdos run. The limit
+            # is applied through /bin/sh rather than preexec_fn, which is unsafe
+            # inside Ray's threaded workers. Unset means no cap, so the default
+            # behaviour is unchanged; a capped program dies with MemoryError and
+            # is scored as a normal evaluation failure.
+            _mem_gb = os.environ.get("DISCOVER_EVAL_MEM_LIMIT_GB", "").strip()
+            if _mem_gb:
+                _argv = [
+                    "/bin/sh",
+                    "-c",
+                    'ulimit -v %d 2>/dev/null; exec "$0" "$1"'
+                    % int(float(_mem_gb) * 1024 * 1024),
+                    sys.executable,
+                    temp_file_path,
+                ]
+            else:
+                _argv = [sys.executable, temp_file_path]
             process = subprocess.Popen(
-                [sys.executable, temp_file_path],
+                _argv,
                 stdout=_out_f,
                 stderr=_err_f,
                 env=env,
