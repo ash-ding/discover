@@ -24,6 +24,7 @@ Environment:
     EXPERIMENT_NAME      [gptoss-{task}-{timestamp}]
 """
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -174,6 +175,18 @@ async def rollouts_for_parent(clients, model, system, prompt, sem, cfg, usage):
 
 # ------------------------------------------------------------------ the loop
 async def main():
+    # asyncio.to_thread() dispatches through the running loop's default
+    # ThreadPoolExecutor, sized min(32, cpu_count + 4) -- 32 on any host with
+    # >=28 cores. Every score_one() goes through that pool, so it, not
+    # RAY_NUM_CPUS, is what caps evaluation concurrency. This never showed on
+    # circle_packing, whose programs return well inside their 530s timeout,
+    # but erdos programs run their full ~1000s budget: 512 of them 32 at a
+    # time is 4.4h/step. Default stays 32 so behaviour is unchanged.
+    _eval_threads = int(os.getenv("EVAL_THREADS", "32"))
+    asyncio.get_running_loop().set_default_executor(
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=_eval_threads, thread_name_prefix="eval"))
+
     task = os.getenv("TASK")
     if task not in TASKS:
         sys.exit(f"TASK must be one of {sorted(TASKS)}; got {task!r}")
