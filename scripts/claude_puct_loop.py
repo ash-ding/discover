@@ -357,7 +357,18 @@ async def main():
                                             code=r["code"], value=value))
                     parents.append(state)
 
-            all_results.extend(dict(r, parent=pi) for r in results)
+            # Carry each rollout's evaluation result into the per-step dump, matching
+            # vllm_puct_loop.py. Without it only the generation side is persisted and
+            # the reward distribution over all attempts cannot be recovered later --
+            # metrics.jsonl keeps only the mean over positively-scored ones. An entry
+            # of None means the rollout produced no usable response, which is itself
+            # the signal that the attempt failed.
+            for _r, _sc in zip(results, scored):
+                _rec = dict(_r, parent=pi)
+                if _sc:
+                    _rec["score"] = float(_sc.get("score", 0.0) or 0.0)
+                    _rec["raw_score"] = _sc.get("raw_score")
+                all_results.append(_rec)
             # Progress within a step: a step is 8x64 calls and can run for
             # tens of minutes, so print per parent rather than going dark.
             done_ok = sum(1 for r in results if r["ok"])

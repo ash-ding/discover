@@ -358,7 +358,18 @@ async def main():
                                             for pi, st in enumerate(states)])
 
         for state, results, scored in per_parent:
-            all_results.extend(dict(r, parent=id(state) % 1000) for r in results)
+            # Carry each rollout's evaluation result into the per-step dump. Without
+            # this only the generation side is persisted, so the reward distribution
+            # over all GROUPS x ROLLOUTS attempts cannot be recovered afterwards --
+            # metrics.jsonl keeps just the mean over positively-scored ones. `sc` is
+            # None when the rollout produced no usable response, which is itself the
+            # signal that attempt failed.
+            for _r, _sc in zip(results, scored):
+                _rec = dict(_r, parent=id(state) % 1000)
+                if _sc:
+                    _rec["score"] = float(_sc.get("score", 0.0) or 0.0)
+                    _rec["raw_score"] = _sc.get("raw_score")
+                all_results.append(_rec)
             for r, sc in zip(results, scored):
                 n_ok += r["ok"]
                 n_code += bool(r["code"])
