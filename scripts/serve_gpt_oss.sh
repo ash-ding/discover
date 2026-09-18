@@ -29,6 +29,8 @@
 set -uo pipefail
 
 MODEL=${MODEL:-openai/gpt-oss-120b}
+# Name the server advertises; the client must request this exact name.
+SERVED_NAME=${SERVED_NAME:-gpt-oss-120b}
 TP=${TP:-1}
 N_GPUS=$(nvidia-smi --list-gpus | wc -l)
 N_REPLICAS=${N_REPLICAS:-$((N_GPUS / TP))}
@@ -81,7 +83,7 @@ start() {
     gpus=$(seq -s, $((i * TP)) $((i * TP + TP - 1)))
     CUDA_VISIBLE_DEVICES=$gpus nohup "$PY" -m vllm.entrypoints.openai.api_server \
       --model "$MODEL" \
-      --served-model-name gpt-oss-120b \
+      --served-model-name "$SERVED_NAME" \
       --port "$port" \
       --tensor-parallel-size "$TP" \
       --max-model-len "$MAX_MODEL_LEN" \
