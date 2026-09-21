@@ -416,7 +416,7 @@ async def main():
             f.write(json.dumps(rec) + "\n")
         with open(rollout_dir / f"{step}.jsonl", "w") as f:
             for r in all_results:
-                f.write(json.dumps({k: v for k, v in r.items() if k != "text"}) + "\n")
+                f.write(json.dumps(r) + "\n")
 
         pct = ""
         if T["target"] and best:
