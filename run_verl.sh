@@ -194,6 +194,20 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-28672}
 LORA_RANK=${LORA_RANK:-32}
+# Which modules LoRA adapts. `all-linear` covers attention *and* MLP on a dense
+# model like Qwen3, but a MoE model keeps its experts in raw nn.Parameters that
+# PEFT cannot match -- on gpt-oss it therefore reaches the attention projections
+# only. Left configurable so that asymmetry is visible rather than implicit.
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-all-linear}
+# Empty keeps verl's fp32 default. Rank 0 materialises the whole model on CPU
+# (see get_init_weight_context_manager), so a 21B model needs 84 GB of host RAM
+# in fp32 -- more than these boxes have. bf16 halves it.
+MODEL_DTYPE=${MODEL_DTYPE:-}
+DTYPE_ARGS=""
+if [ -n "$MODEL_DTYPE" ]; then
+  DTYPE_ARGS="actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE"
+  DTYPE_ARGS="$DTYPE_ARGS actor_rollout_ref.ref.fsdp_config.model_dtype=$MODEL_DTYPE"
+fi
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
 # CUDA graph: False 可显著提速解码, True 为历史默认值
@@ -324,7 +338,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.lora_rank=${LORA_RANK} \
     actor_rollout_ref.model.lora_alpha=${LORA_RANK} \
-    actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.target_modules=${LORA_TARGET_MODULES} \
     "++actor_rollout_ref.model.lora.merge=True" \
     \
     actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
@@ -342,6 +356,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
+    ${DTYPE_ARGS} \
     \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
