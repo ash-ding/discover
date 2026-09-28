@@ -78,12 +78,46 @@ copies. Judge success by file count + bytes + md5, never by exit code.
 
 ### Environment
 
-- conda env is `verl_discover` on all hosts. On **lumen1 it is under `~/miniconda3`**; on
+- On the **lumens** the env is `verl_discover`. On **lumen1 it lives under `~/miniconda3`**; on
   lumen2/lumen3 under `~/miniforge3`. Launch scripts resolve it with
   `ls miniforge3/... miniconda3/... | head -1` — `ls` sorts alphabetically, so `miniconda3`
   wins on lumen1, which happens to be correct there.
+- On **node10 the env is different**: `~/.conda/envs/lumen` (not under miniforge3 or
+  miniconda3 — globbing those paths finds nothing and will mislead you). It carries
+  vllm 0.23.0, torch 2.11.0+cu129, ray 2.56.0, openai 2.44.0.
 - `~/install/cuda129` is the **live CUDA 12.9 toolkit** and is what `which nvcc` resolves to.
   `.bashrc` references it. The system only has CUDA 13.2. **Do not delete it.**
+
+### node10's repo — read before touching it
+
+node10 had **two clones** of this repo until 2026-09-28: `~/code/discover` and
+`~/code/discover-claude`. They are now **consolidated into `~/code/discover`**. Old scripts,
+logs and backups still mention `discover-claude`; that path no longer exists — do not go
+looking for it, and do not recreate it.
+
+The consolidation direction was the opposite of what the evidence first suggested, which is
+worth knowing if you ever redo something like it:
+
+- every script pointed at `discover-claude`, so it looked like the live one;
+- but `~/.conda/envs/lumen` has verl as an **editable install pinned to
+  `~/code/discover/verl`**. Deleting that path breaks `import verl` for the whole env.
+- `discover-claude` was additionally a **shallow clone with an empty `verl/`**, so it could
+  not have run VERL training at all.
+
+So `discover` was kept, the two scripts (`~/launch_gptoss_repeat.sh`, `~/node_setup.sh`) were
+repointed to it, and `discover-claude` was deleted. Originals of both scripts are in
+`~/.merge_backup_20260928_202100`.
+
+**Two stashes live in that repo** and are intentionally preserved — `git stash list`:
+
+- `stash@{0}` (Jul 2026): one line in `run_verl.sh` setting `DISCOVER_CLAUDE_SYSTEM_PROMPT`
+  for erdos.
+- `stash@{1}` (Jun 2026): 27 files, +392/−194 — a YAML config refactor plus a `run_verl.sh`
+  rewrite.
+
+Neither has been evaluated against current `main`. A `git gc --prune=now` together with
+`git reflog expire --expire=now` **would destroy both**; the cleanup that reduced `.git` from
+454M to 56M deliberately used the conservative form instead.
 
 ---
 
