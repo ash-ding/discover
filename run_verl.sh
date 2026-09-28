@@ -203,6 +203,12 @@ LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-all-linear}
 # (see get_init_weight_context_manager), so a 21B model needs 84 GB of host RAM
 # in fp32 -- more than these boxes have. bf16 halves it.
 MODEL_DTYPE=${MODEL_DTYPE:-}
+# Offloading params and optimizer state to host RAM was tuned for an 8B dense
+# model. Eight FSDP workers doing it for a 21B model exceeded this box's 99 GB
+# and Ray killed the vLLM servers; the GPUs meanwhile sat at 5 GB/card. Keep
+# the old default so existing runs are untouched, but let big models opt out.
+PARAM_OFFLOAD=${PARAM_OFFLOAD:-True}
+OPTIMIZER_OFFLOAD=${OPTIMIZER_OFFLOAD:-True}
 DTYPE_ARGS=""
 if [ -n "$MODEL_DTYPE" ]; then
   DTYPE_ARGS="actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE"
@@ -353,8 +359,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${PARAM_OFFLOAD} \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OPTIMIZER_OFFLOAD} \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     ${DTYPE_ARGS} \
     \
@@ -371,7 +377,7 @@ python3 -m verl.trainer.main_ppo \
     \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=${PARAM_OFFLOAD} \
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     \
     reward.custom_reward_function.path=${PWD}/ttt_discover/verl_integration/verl_reward.py \
