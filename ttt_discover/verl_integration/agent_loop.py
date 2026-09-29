@@ -135,7 +135,26 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         self._phase1_max_tokens = discover_config.get("phase1_max_tokens", 26000)
         self._context_window = discover_config.get("max_model_len", 32768)
         self._context_buffer = 50
-        self._phase2_prefill = "\n\n... I need to give my final answer now.\n</think>\n"
+
+        # verl truncates anything past max_response_length, so the agent loop
+        # has to budget against that cap as well as the model context -- on
+        # gpt-oss the two differ and the context alone would overrun it.
+        self._max_response_length = discover_config.get("max_response_length", 0)
+
+        # The two-phase protocol is model-agnostic; only two strings in it are
+        # family-specific. Qwen3 delimits its reasoning with <think>/</think>,
+        # so ending it is a matter of emitting the closing tag. gpt-oss reasons
+        # in a harmony "analysis" channel, and the answer lives in a separate
+        # "final" channel: closing analysis is not enough, the final channel has
+        # to be opened explicitly, which is what the prefill below does.
+        if str(discover_config.get("renderer", "qwen3")).startswith("gpt_oss"):
+            self._thinking_end_marker = "<|channel|>final<|message|>"
+            self._phase2_prefill = (
+                "<|end|><|start|>assistant<|channel|>final<|message|>"
+            )
+        else:
+            self._thinking_end_marker = "</think>"
+            self._phase2_prefill = "\n\n... I need to give my final answer now.\n</think>\n"
         self._phase2_prefill_ids = self._tokenizer.encode(
             self._phase2_prefill, add_special_tokens=False
         )
@@ -316,7 +335,10 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         t0 = time.time()
 
         prompt_len = len(prompt_ids)
-        phase1_budget = self._phase1_max_tokens - prompt_len
+        phase1_budget = min(
+            self._phase1_max_tokens - prompt_len,
+            self._budget(prompt_len),
+        )
         if phase1_budget <= 0:
             logger.warning(f"Prompt too long ({prompt_len}), using minimal budget")
             phase1_budget = 100
@@ -348,12 +370,12 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             response_ids = p1_tokens
             response_logprobs = p1_logprobs
             response_mask = [1] * len(p1_tokens)
-        elif self._contains_pattern(p1_tokens, "</think>"):
+        elif self._contains_pattern(p1_tokens, self._thinking_end_marker):
             # Case B: budget exhausted but </think> present — thinking done,
             # answer truncated. Continue generating without prefill.
             gen_case = "B"
             phase2_prompt = prompt_ids + p1_tokens
-            phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
+            phase2_budget = self._budget(len(phase2_prompt), len(p1_tokens))
             if phase2_budget <= 0:
                 response_ids = p1_tokens
                 response_logprobs = p1_logprobs
@@ -376,7 +398,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             # Inject prefill to force end of thinking and start answer.
             gen_case = "C"
             phase2_prompt = prompt_ids + p1_tokens + self._phase2_prefill_ids
-            phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
+            phase2_budget = self._budget(
+                len(phase2_prompt), len(p1_tokens) + len(self._phase2_prefill_ids)
+            )
             if phase2_budget <= 0:
                 response_ids = p1_tokens + self._phase2_prefill_ids
                 response_logprobs = p1_logprobs + [0.0] * len(self._phase2_prefill_ids)
@@ -441,7 +465,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         import time
 
         t0 = time.time()
-        budget = self._context_window - len(prompt_ids) - self._context_buffer
+        budget = self._budget(len(prompt_ids))
         if budget <= 0:
             logger.warning(
                 "Prompt of %d tokens leaves no room in a %d-token window",
@@ -719,6 +743,19 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             partition_id=partition_id,
         )
 
+    def _budget(self, consumed: int, generated: int = 0) -> int:
+        """Tokens still generatable, whichever cap binds first.
+
+        `consumed` counts every token already in the prompt sent to vLLM
+        (original prompt plus anything prefilled or generated so far);
+        `generated` counts only the part that will land in the response, which
+        is what verl's max_response_length limits.
+        """
+        budget = self._context_window - consumed - self._context_buffer
+        if self._max_response_length:
+            budget = min(budget, self._max_response_length - generated)
+        return budget
+
     def _hit_stop_token(self, tokens: list[int]) -> bool:
         if not tokens or not self._stop_token_ids:
             return False
@@ -759,6 +796,9 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "env_class": os.environ.get("DISCOVER_ENV_CLASS", "CirclePackingEnv"),
             "problem_type": os.environ.get("DISCOVER_PROBLEM_TYPE", "26"),
             "phase1_max_tokens": int(os.environ.get("DISCOVER_PHASE1_MAX_TOKENS", "26000")),
+            "max_response_length": int(
+                self.config.actor_rollout_ref.rollout.response_length or 0
+            ),
             "max_model_len": int(os.environ.get("DISCOVER_MAX_MODEL_LEN", "32768")),
             "eval_timeout": int(os.environ.get("DISCOVER_EVAL_TIMEOUT", "530")),
             "num_cpus_per_task": int(os.environ.get("DISCOVER_NUM_CPUS_PER_TASK", "1")),
