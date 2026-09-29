@@ -124,8 +124,12 @@ async def generate_one(clients, model, system, prompt, hint, sem, cfg, usage, id
 
     gpt-oss emits harmony channels; vLLM puts the answer in `content` and the
     chain of thought in `reasoning_content`. Only `content` is parsed for code,
-    but reasoning tokens are still billed against max_tokens, which is why the
-    cap is generous rather than tuned.
+    but the trace is persisted as `reasoning` (None for Qwen-style models,
+    whose whole trace arrives inside `content`). Reasoning tokens are still
+    billed against max_tokens, which is why the cap is generous rather than
+    tuned. The record also carries `prompt`, the exact user message sent --
+    the template is rebuilt from the parent state at runtime, so without it
+    a dumped rollout is not a self-contained (input, output) pair.
     """
     client = clients[idx % len(clients)]
     async with sem:
@@ -143,14 +147,17 @@ async def generate_one(clients, model, system, prompt, hint, sem, cfg, usage, id
             )
             ch = r.choices[0]
             text = ch.message.content or ""
+            reasoning = getattr(ch.message, "reasoning_content", None)
             u = getattr(r, "usage", None)
             usage.add(getattr(u, "prompt_tokens", 0), getattr(u, "completion_tokens", 0))
-            return dict(ok=True, text=text, code=extract_code(text),
+            return dict(ok=True, prompt=user, text=text, reasoning=reasoning,
+                        code=extract_code(text),
                         truncated=ch.finish_reason == "length",
                         out_tokens=getattr(u, "completion_tokens", 0),
                         stop=ch.finish_reason, secs=round(time.time() - t0, 1))
         except Exception as e:
-            return dict(ok=False, text="", code="", truncated=False, out_tokens=0,
+            return dict(ok=False, prompt=user, text="", reasoning=None, code="",
+                        truncated=False, out_tokens=0,
                         stop="error", secs=round(time.time() - t0, 1),
                         error=f"{type(e).__name__}: {str(e)[:200]}", idx=idx)
 
@@ -295,6 +302,7 @@ async def main():
     json.dump({"task": task, "experiment": exp, "resumed_from": resume,
                "config": cfg, "concurrency": concurrency,
                "endpoints": endpoints,
+               "system_prompt": system,
                "target": T["target"], "minimize": T["minimize"],
                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")},
               open(out_dir / "config_snapshot.json", "w"), indent=2)
@@ -358,17 +366,23 @@ async def main():
                                             for pi, st in enumerate(states)])
 
         for state, results, scored in per_parent:
-            # Carry each rollout's evaluation result into the per-step dump. Without
-            # this only the generation side is persisted, so the reward distribution
-            # over all GROUPS x ROLLOUTS attempts cannot be recovered afterwards --
-            # metrics.jsonl keeps just the mean over positively-scored ones. `sc` is
-            # None when the rollout produced no usable response, which is itself the
-            # signal that attempt failed.
+            # Carry each rollout's evaluation result and provenance into the
+            # per-step dump. `prompt`/`text`/`reasoning` come from generate_one;
+            # the parent is recorded by its real uuid and value (an earlier
+            # version stored id(state) % 1000, a memory-address hash that maps
+            # to nothing once the process exits), so a rollout links back to
+            # the sampler snapshots. Field names match the VERL-side dumps.
+            # `sc` is None when the rollout produced no usable response, which
+            # is itself the signal that attempt failed.
             for _r, _sc in zip(results, scored):
-                _rec = dict(_r, parent=id(state) % 1000)
+                _rec = dict(_r, puct_parent_id=state.id,
+                            puct_parent_value=state.value)
                 if _sc:
                     _rec["score"] = float(_sc.get("score", 0.0) or 0.0)
                     _rec["raw_score"] = _sc.get("raw_score")
+                    _rec["eval_msg"] = _sc.get("eval_msg")
+                    _rec["correctness"] = _sc.get("correctness")
+                    _rec["result_construction"] = _sc.get("result_construction")
                 all_results.append(_rec)
             for r, sc in zip(results, scored):
                 n_ok += r["ok"]

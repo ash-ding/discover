@@ -31,6 +31,22 @@ else
   fail=1
 fi
 
+# 1b. The loop must persist the exact input prompt, the reasoning trace, and
+#     the parent's real uuid, or the run's rollouts cannot be reused for
+#     SFT/distillation afterwards: every gpt-oss run up to and including
+#     gptoss-erdos-50step-repeat2 dropped ~40k reasoning tokens per rollout
+#     (vLLM returns them in `reasoning_content`, which the loop never read),
+#     and recorded the parent as id(state) % 1000 -- a memory-address hash
+#     that maps to nothing once the process exits.
+if grep -q 'reasoning_content' scripts/vllm_puct_loop.py 2>/dev/null \
+   && grep -q 'prompt=user' scripts/vllm_puct_loop.py 2>/dev/null \
+   && grep -q 'puct_parent_id=state.id' scripts/vllm_puct_loop.py 2>/dev/null; then
+  say "prompt/reasoning/parent persistence" "present"
+else
+  say "prompt/reasoning/parent persistence" "MISSING - inputs and reasoning would be lost"
+  fail=1
+fi
+
 # 2. The server must be able to advertise a name other than gpt-oss-120b, or
 #    every request for the model actually loaded returns 404 - and only after
 #    all replicas have finished loading.
