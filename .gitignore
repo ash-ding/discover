@@ -244,3 +244,6 @@ examples/ahc/lib/cache/
 .podman_storage/
 !.podman_storage/storage.conf  # Keep the config file in git
 *_logslogs/
+
+# Per-run metric streams written by the tracking logger, named after the project.
+ttt-discover/
