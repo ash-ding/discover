@@ -429,6 +429,11 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     + [1] * len(p2_tokens)
                 )
 
+        # Case A means the model stopped on its own, and it is reached
+        # exactly when the budget was not exhausted -- so B and C are the only
+        # cases left here, and each is truncated iff its second call ran out
+        # of budget too rather than reaching a stop token.
+        truncated = budget_exhausted and not self._hit_stop_token(response_ids)
         gen_time = time.time() - t0
 
         # BUG-005: Validate concatenated token IDs decode without corruption
@@ -446,7 +451,17 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             response_logprobs,
             response_mask,
             gen_time,
-            {"gen_case": gen_case, "p1_len": len(p1_tokens), "p2_len": p2_len},
+            {
+                "gen_case": gen_case,
+                "p1_len": len(p1_tokens),
+                "p2_len": p2_len,
+                # Only the single-phase path used to report this, so a
+                # two-phase run showed a truncation rate of zero when the
+                # field was simply never written. Case A stopped on its own;
+                # B and C ran a second call, so they are truncated exactly
+                # when that call exhausted its budget too.
+                "truncated": truncated,
+            },
         )
 
     async def _produce_single_phase(
