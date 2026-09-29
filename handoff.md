@@ -321,11 +321,30 @@ through decode/encode, which `_contains_pattern` relies on.
 
 **Why this matters more than it sounds:** run gpt-oss-20b at `gpt_oss_high_reasoning` with
 one plain generate call and it spends the *entire* budget inside `analysis`, never emitting a
-code block. Measured: 7 of 8 rollouts scored 0.0 with `eval_error: "no code block extracted"`,
-outputs all 110-130K chars — exactly the token cap. The single rollout that reached `final`
-scored 2.37. So **an all-zero `critic/score` on gpt-oss is a generation-protocol symptom, not
-a scoring or weight-sync failure.** Check `rollouts/N.jsonl` for the `code` field before
-suspecting anything else: empty `code` means the model never got out of `analysis`.
+code block. Measured on erdos:
+
+| | one plain call (8 rollouts) | two-phase with harmony prefill (48) |
+|---|---|---|
+| produced a code block | 1/8 (12%) | **47/48 (98%)** |
+| truncated | 7/8 (88%) | **0/48** |
+| non-zero score | 1/8 | 18/48 (38%) |
+| best score | 2.366 | 2.594 |
+
+47 of 48 take Case C — the model never leaves `analysis` on its own. `p2_len` averages 2443
+tokens, peak 4367, so the forced final channel does real work rather than emitting a stub.
+
+So **an all-zero `critic/score` on gpt-oss is a generation-protocol symptom, not a scoring or
+weight-sync failure.** Check `rollouts/N.jsonl` for the `code` field before suspecting
+anything else: empty `code` means the model never got out of `analysis`.
+
+The zeros that remain are all legitimate domain outcomes — 17 generated programs crashed or
+timed out, 6 were caught by the C5 anti-cheat check, 5 violated `h ∈ [0,1]`, 1 divided by
+zero, 1 had no code block. A rollout batch on erdos is *supposed* to look like this; do not
+read 38% non-zero as a fault.
+
+**Do not read the per-step max as learning.** Across 6 steps it went 2.15, 2.34, 2.59, 2.59,
+2.36, 2.33 — 8 rollouts a step, LoRA that never touches the experts, and no baseline. That is
+noise, and the smoke test was never powered to show otherwise.
 
 ### Budget against the response cap, not just the context
 
