@@ -20,7 +20,11 @@ shift  # remaining args passed to python
 
 # Activate correct conda env
 CONDA_ENV=${CONDA_ENV:-verl_discover}
-if [ "$CONDA_DEFAULT_ENV" != "$CONDA_ENV" ]; then
+# ${CONDA_DEFAULT_ENV:-} rather than bare: the variable only exists once conda
+# has been activated, so under `set -u` this line killed every non-interactive
+# launch -- nohup, ssh, cron -- with "unbound variable", which names the symptom
+# and not the cause.
+if [ "${CONDA_DEFAULT_ENV:-}" != "$CONDA_ENV" ]; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate "$CONDA_ENV"
 fi
 
@@ -203,6 +207,24 @@ LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-all-linear}
 # (see get_init_weight_context_manager), so a 21B model needs 84 GB of host RAM
 # in fp32 -- more than these boxes have. bf16 halves it.
 MODEL_DTYPE=${MODEL_DTYPE:-}
+# Attention backend. Empty keeps whatever the model declares. gpt-oss needs
+# sinks, which rules out sdpa, and transformers routes its flash path through
+# a hub kernel that has no build for torch 2.11+cu129 -- so eager is the only
+# implementation that actually loads there.
+ATTN_IMPL=${ATTN_IMPL:-}
+# vLLM's context window. Left unset, verl falls back to the checkpoint's
+# max_position_embeddings, which for gpt-oss is far larger than the KV cache
+# gpu_memory_utilization can hold -- the engine then dies mid-generation.
+# Keep it in step with the agent loop's own DISCOVER_MAX_MODEL_LEN.
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-}
+ROLLOUT_LEN_ARGS=""
+if [ -n "$ROLLOUT_MAX_MODEL_LEN" ]; then
+  ROLLOUT_LEN_ARGS="actor_rollout_ref.rollout.max_model_len=$ROLLOUT_MAX_MODEL_LEN"
+fi
+ATTN_ARGS=""
+if [ -n "$ATTN_IMPL" ]; then
+  ATTN_ARGS="+actor_rollout_ref.model.override_config.attn_implementation=$ATTN_IMPL"
+fi
 # Offloading params and optimizer state to host RAM was tuned for an 8B dense
 # model. Eight FSDP workers doing it for a 21B model exceeded this box's 99 GB
 # and Ray killed the vLLM servers; the GPUs meanwhile sat at 5 GB/card. Keep
@@ -363,6 +385,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OPTIMIZER_OFFLOAD} \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     ${DTYPE_ARGS} \
+    ${ATTN_ARGS} \
+    ${ROLLOUT_LEN_ARGS} \
     \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \

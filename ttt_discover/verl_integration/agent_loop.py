@@ -416,7 +416,13 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     "Two-phase token junction mismatch: decoded=%r re_encoded=%r vs original=%r",
                     decoded_junction, re_encoded[:10], junction,
                 )
-        return response_ids, response_logprobs, response_mask, gen_time, {"gen_case": gen_case}
+        return (
+            response_ids,
+            response_logprobs,
+            response_mask,
+            gen_time,
+            {"gen_case": gen_case, "p1_len": len(p1_tokens), "p2_len": p2_len},
+        )
 
     async def _produce_single_phase(
         self,
@@ -642,8 +648,12 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         reward_extra["gen_case"] = gen_case
         if "truncated" in gen_extra:
             reward_extra["truncated"] = gen_extra["truncated"]
-        reward_extra["p1_len"] = len(p1_tokens)
-        reward_extra["p2_len"] = p2_len
+        # Phase lengths only exist for the two-phase strategy; single-phase has
+        # no phases to measure. Reported through the extras dict so this tail
+        # stays free of variables that belong to one strategy.
+        for _k in ("p1_len", "p2_len"):
+            if _k in gen_extra:
+                reward_extra[_k] = gen_extra[_k]
         reward_extra["gen_time_s"] = round(gen_time, 3)
         reward_extra["eval_time_s"] = round(eval_time, 3)
         reward_extra["code"] = code
