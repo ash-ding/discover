@@ -1,19 +1,43 @@
 # Handoff — TTT-Discover reproduction
 
-Written 2026-09-28. Everything below was verified on the machines that day, not recalled.
+Written 2026-09-28, updated 2026-09-29. Everything below was verified on the machines on
+the day it was written, not recalled. Section 1 is the only part that goes stale on its
+own — re-check it before you act on it.
 
 > **Read this before `CLAUDE.md` and `EXPERIMENT_PLAN.md`.** Both are stale and contradict
-> reality in ways that will cost you time — see [Stale docs](#stale-docs-do-not-trust-these).
+> reality in ways that will cost you time — see [Stale docs](#7-stale-docs--do-not-trust-these).
 
 ---
 
 ## 1. Where things stand right now
 
-**Nothing is running.** No training, no inference loop, no vLLM, no cron watchdogs, no
-background watchers. All experiment records are archived to shared storage and local copies
-deleted. The repo is on `main` at `321637d`, in sync with `origin`.
+*As of 2026-09-29 17:20 UTC. Verify before acting — this is the one section that decays.*
 
-Four hosts, all reachable: `lumen1`, `lumen2`, `lumen3`, `node10`.
+**One job is running, on lumen1. Do not disturb it.**
+
+| Host | State |
+|---|---|
+| **lumen1** | **RUNNING** the third gpt-oss erdos inference-only repeat. Step 7/50, ~2.9h a step, 0 errors, `best=0.38086449`. Started 2026-09-28 21:46 UTC; **~5 days left**, finishing around Oct 4-5. |
+| lumen2 | idle, 0 GPU |
+| lumen3 | idle, 0 GPU |
+| node10 | idle **for us**. GPU 0 holds 72G belonging to user `lab` — not ours, never kill it. GPUs 4-7 are the ones to use. |
+
+**lumen1 is deliberately NOT synced.** Its repo sits at `ff80d9a` while every other host is at
+`f150b9e`. Do not `git pull` there until the run finishes: the loop uses Ray, and a worker
+spawned mid-run would re-import from disk. The already-running process is safe either way, but
+there is no reason to take the risk for a run with five days invested in it.
+
+Run: `~/launch_gptoss_repeat2.sh`, log `~/gptoss_run_gptoss-erdos-50step-repeat2.log`, output
+`checkpoints/gptoss-puct/gptoss-erdos-50step-repeat2`. Despite the `repeat2` name this is the
+**third** repeat — the convention is bare / `-repeat` / `-repeat2`, matching the qwen3 series.
+
+**gpt-oss training support is merged.** ash-ding/discover#16 and ash-ding/verl#1, both by merge
+commit rather than squash so the submodule pointer `e89c4168` stays an ancestor of verl `main`.
+`main` is `f150b9e`, verl submodule `e89c4168`. See [section 9](#9-gpt-oss-training-support--what-works-what-to-watch).
+
+**Nothing is left half-done.** No open branches, no uncommitted work on any host, no cron
+watchdogs. The two feature worktrees (`~/code/discover-gptoss` on lumen2 and node10) were
+removed after the merge.
 
 ---
 
@@ -59,6 +83,10 @@ Three distinct places:
 | `/scratch` | separate dataset, 250G quota | model weights, caches (`~/models`, `~/.cache`, `~/forge_images`, `~/download` are symlinks into it) |
 | `~/data` | rclone mount of `ai:ai-innovation-bucket/users/asherding` | **experiment archive** — the only genuinely off-pool storage |
 
+The table above is the **lumens**. node10 reaches the same bucket through s3fs at
+`/new_data/users/asherding/` and has no `~/data`; its own disks are `/workspace` (2T, the
+home) plus eight 7T NVMe drives that are mostly empty. See [section 10](#10-the-experiment-archive--where-records-live-and-how-to-read-it).
+
 **Unresolved:** `/`'s *available* figure does not respond to anything. Moving 104G off `/` and
 deleting 57G on `/scratch` both left it unchanged, yet writing 5G to `/` consumes 5G and
 deleting it returns 5G immediately. Accounting lag, pool sharing, and snapshots were each
@@ -93,6 +121,18 @@ copies. Judge success by file count + bytes + md5, never by exit code.
   `torch211-cu130` but **not** the `torch211-cu129` this env needs, so flash attention is
   unreachable there and the only way forward would be `eager`. 4.57.6 uses the local
   `flash_attn` directly. Do not upgrade transformers on node10 without re-checking this.
+- **`verl` is an editable install, and the `.pth` can point somewhere you don't expect.**
+  `site-packages/__editable__.verl-0.9.0.dev0.pth` is a single line holding a path. On
+  2026-09-29 it pointed at a feature *worktree* on lumen2 and node10, not at
+  `~/code/discover/verl` — so `git pull` succeeded and `import verl` still loaded the old
+  code. On lumen2 that worktree's verl was a commit behind and missing a patch, which would
+  have failed at runtime with `AttributeError: 'NoneType' object has no attribute 'lower'`.
+  Both are repointed now. **Checking out code is not the same as installing it**; after any
+  sync, verify with
+  `python -c "import verl,inspect,os;print(os.path.dirname(inspect.getfile(verl)))"`
+  from outside the repo directory, and better, grep the imported source for a patch you
+  expect. Repointing is just rewriting that one line (plus `direct_url.json` in the
+  dist-info, so `pip show` stops lying); no rebuild needed.
 - `~/install/cuda129` is the **live CUDA 12.9 toolkit** and is what `which nvcc` resolves to.
   `.bashrc` references it. The system only has CUDA 13.2. **Do not delete it.**
 
@@ -241,8 +281,16 @@ trained checkpoint and with the base model. If the trained checkpoint wins at eq
 budget, the model improved; if they tie, AC1's advantage was a by-product of extra search.
 
 The VERL archives under `~/data/discover-runs/*_verl_*` and `ac1-repeat*` carry `latest/` and
-`latest_checkpointed_iteration.txt`. **Nobody has verified these checkpoints still load** —
-that is step one.
+`latest_checkpointed_iteration.txt`. Confirmed 2026-09-29: all 8 training runs have real
+weights on the shared disk — `latest/actor/` holds FSDP 8-way shards plus `lora_train_meta.json`,
+**32G per run, ~256G total**, with `latest_checkpointed_iteration.txt` reading 50. What is
+still unverified is whether they **load** — that is step one, and it is now a loading problem
+rather than a "do they even exist" problem.
+
+One thing that changed the option space: gpt-oss training works as of 2026-09-29 (section 9),
+so a trained-gpt-oss arm is no longer blocked on infrastructure. Before treating it as
+comparable to the Qwen3 arms, read the LoRA/MoE caveat in section 9 — it is a real confound,
+not a footnote.
 
 Two further ideas, in rough priority order: more repeats per cell (every setting except Erdős
 and AC1 is still a single point), and distilling a frontier model's rollout traces into the
@@ -284,9 +332,16 @@ small model via SFT instead of running RL.
 
 ## 9. gpt-oss training support — what works, what to watch
 
-Branch `feat/gpt-oss-training` (this repo) plus `feat/mxfp4-dequantize-passthrough` (the verl
-submodule) make the **VERL training path** accept `openai/gpt-oss-*`. Debugged on
-gpt-oss-20b, node10 GPUs 4-7. Three patches, each for a distinct wall:
+**Merged 2026-09-29** as ash-ding/discover#16 and ash-ding/verl#1 (branches
+`feat/gpt-oss-training` and `feat/mxfp4-dequantize-passthrough`). The **VERL training path**
+now accepts `openai/gpt-oss-*`. Debugged on gpt-oss-20b, node10 GPUs 4-7; the run that
+verified it is archived at `~/data/discover-runs/gptoss-training-smoke-20260929/`.
+
+Both were merged with a merge commit rather than squash or rebase **on purpose**: those
+rewrite SHAs, which would have left the submodule pointer `e89c4168` off verl `main`'s
+history. If you merge another submodule-touching PR here, do the same.
+
+Three patches, each for a distinct wall:
 
 1. **MXFP4 cannot be trained.** The checkpoint stores every MoE expert as a `blocks`/`scales`
    pair, and `Mxfp4HfQuantizer.is_trainable` raises outright. verl's FSDP engine now detects
@@ -409,3 +464,72 @@ so, or without first teaching PEFT to target the expert parameters.
   per card**. The next attempt then dies of CUDA OOM for no visible reason. Kill by PID from
   `nvidia-smi --query-compute-apps`, and filter to your own user — GPU 0 on node10 carries
   another user's job.
+
+---
+
+## 10. The experiment archive — where records live, and how to read it
+
+All four hosts reach the **same S3 bucket**, at different paths and through different clients:
+
+| Host | Client | Path to the archive |
+|---|---|---|
+| lumen1/2/3 | rclone | `~/data/discover-runs/` |
+| node10 | s3fs | `/new_data/users/asherding/discover-runs/` |
+
+node10 is **not** cut off from shared storage, which is easy to believe because it has no
+`~/data`. It sees the same 20 experiment directories.
+
+### node10's directory listings are wrong — its file reads are fine
+
+`ls /new_data/users/asherding/discover-runs` on node10 returned 8 entries while all three
+lumens returned 19, and `ls` one level up showed a single entry while `discover-runs` was
+sitting there and openable by full path. Direct reads were verified byte-correct against
+lumen3. So: **never conclude "not archived" from an `ls` on node10.** Check from a lumen, or
+stat the full path. rclone on the lumens has its own, different problem — a freshly written
+file is invisible to *other* hosts for ~5 minutes, so verify an upload from a host that did
+not write it.
+
+### What each run directory holds
+
+Two shapes, because the two code paths log differently:
+
+| | count | metrics file | model weights |
+|---|---|---|---|
+| VERL training runs | 8 | `<run-name>.jsonl` | `latest/actor/`, **32G each** |
+| inference-only runs | 11 | `metrics.jsonl` | none — correctly, nothing trains |
+
+Both also carry `config_snapshot.json`, 51 `puct_sampler_step_*.json`, and `rollouts/` with 50
+jsonl files. The two `-aborted-` runs have 1 snapshot and 0 rollouts, matching runs that died
+during step 1.
+
+Two traps in that table. The metrics file is **named after the run** on the training side, so
+looking for `metrics.jsonl` reports "no metrics" for 8 real runs. And the weights sit three
+levels down in `latest/actor/`, so `find -maxdepth 2` misses ~256G of checkpoints. Both of
+these fooled me on 2026-09-29.
+
+For an inference-only run the **PUCT snapshots are the resumable state** — there is no model
+checkpoint to look for, and `resumed_from` in the config shows they are used that way.
+
+### Archived on 2026-09-29
+
+The five gpt-oss stdout logs that had only ever existed on node10 are now in each run's
+`log/` subdirectory. Correspondence was established by content, not filename: every step line
+(`code=` / `scored=` / `trunc=` / `err=` / `ok=`) was matched against that run's
+`metrics.jsonl` across all 50 steps, and cross-checked against the other candidates — 0/50
+mismatches on the diagonal, 50/50 off it. The two `-aborted-` logs have no step lines and
+both name `gptoss-erdos-50step` internally (the `-aborted-` suffixes were added later, at
+archive time), so they were pinned by timestamp instead: the cpus16 log stops at 04:49:51 and
+the threads32 *run* starts at 04:50:56, which makes the swapped assignment impossible.
+
+Also added: `gptoss-training-smoke-20260929/`, the run that verified gpt-oss training, with a
+README saying plainly that it is not an experiment and its scores must not be compared with
+the 50-step runs beside it.
+
+**What is still node10-local:** nothing that matters. A 4.6K temp file under `~/tinker_log/tmp`
+from a run that died in July.
+
+### If you archive something yourself
+
+`cp -a` onto these mounts returns **rc=1** (it cannot preserve permissions) even when every
+byte lands. Judge by file count, bytes and md5, never exit code. Put a run's files inside that
+run's directory — every run has an empty `log/` waiting for exactly this.
