@@ -354,6 +354,19 @@ unset, vLLM falls back to `max_position_embeddings` (131072 for gpt-oss), the KV
 not fit, and the run dies with `EngineDeadError` — which looks nothing like a context-length
 problem.
 
+**`run_verl.sh` used to clobber three of these.** Every per-task `case` block assigned
+`DISCOVER_PHASE1_MAX_TOKENS`, `DISCOVER_EVAL_TIMEOUT` and `DISCOVER_NUM_CPUS_PER_TASK`
+unconditionally, so exporting them before calling the script did nothing — silently, with the
+default appearing in the logs as if you had asked for it. They now use `${VAR:-default}`.
+The four settings beside them (env module, class, problem type, data source) are still
+assigned unconditionally on purpose: those define *which* task runs.
+
+Sizing the phase-1 budget is the main thing you will tune for a new model. It is a **position
+cap, not a token count** — the budget is `DISCOVER_PHASE1_MAX_TOKENS - prompt_len`, and what
+is left for the answer is whatever remains under `max_response_length`. For gpt-oss-20b on
+erdos: 26000 left ~3400 tokens for the final channel and one rollout in eight ran out
+mid-statement; 20000 leaves ~9400, against a longest observed answer of ~1900.
+
 ### Known limitation, and it is a real confound
 
 `GptOssExperts` holds its weights as raw `nn.Parameter`, **not** `nn.Linear`. PEFT's
