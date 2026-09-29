@@ -20,7 +20,11 @@ shift  # remaining args passed to python
 
 # Activate correct conda env
 CONDA_ENV=${CONDA_ENV:-verl_discover}
-if [ "$CONDA_DEFAULT_ENV" != "$CONDA_ENV" ]; then
+# ${CONDA_DEFAULT_ENV:-} rather than bare: the variable only exists once conda
+# has been activated, so under `set -u` this line killed every non-interactive
+# launch -- nohup, ssh, cron -- with "unbound variable", which names the symptom
+# and not the cause.
+if [ "${CONDA_DEFAULT_ENV:-}" != "$CONDA_ENV" ]; then
     eval "$(conda shell.bash hook 2>/dev/null)" && conda activate "$CONDA_ENV"
 fi
 
@@ -43,9 +47,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.circle_packing.env
         export DISCOVER_ENV_CLASS=CirclePackingEnv
         export DISCOVER_PROBLEM_TYPE=26
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=530
-        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-530}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-1}
         export DISCOVER_DATA_SOURCE=circle_packing_26
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.1}
@@ -56,9 +60,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.circle_packing.env
         export DISCOVER_ENV_CLASS=CirclePackingEnv
         export DISCOVER_PROBLEM_TYPE=32
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=530
-        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-530}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-1}
         export DISCOVER_DATA_SOURCE=circle_packing_32
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.1}
@@ -69,9 +73,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.ac_inequalities.env
         export DISCOVER_ENV_CLASS=AutoCorrInequalityEnv
         export DISCOVER_PROBLEM_TYPE=ac1
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=1100
-        export DISCOVER_NUM_CPUS_PER_TASK=2
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-1100}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-2}
         export DISCOVER_DATA_SOURCE=ac_inequalities_ac1
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.1}
@@ -82,9 +86,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.ac_inequalities.env
         export DISCOVER_ENV_CLASS=AutoCorrInequalityEnv
         export DISCOVER_PROBLEM_TYPE=ac2
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=1100
-        export DISCOVER_NUM_CPUS_PER_TASK=2
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-1100}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-2}
         export DISCOVER_DATA_SOURCE=ac_inequalities_ac2
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.1}
@@ -95,9 +99,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.erdos_min_overlap.env
         export DISCOVER_ENV_CLASS=ErdosMinOverlapEnv
         export DISCOVER_PROBLEM_TYPE=""
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=1100
-        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-1100}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-1}
         export DISCOVER_DATA_SOURCE=erdos_min_overlap
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.1}
@@ -108,9 +112,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.denoising.env
         export DISCOVER_ENV_CLASS=DenoisingEnv
         export DISCOVER_PROBLEM_TYPE=""
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=530
-        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-530}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-1}
         export DISCOVER_DATA_SOURCE=denoising
         ACTOR_LR=${ACTOR_LR:-4e-5}
         KL_COEF=${KL_COEF:-0.1}
@@ -121,9 +125,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.gpu_mode.env
         export DISCOVER_ENV_CLASS=GpuModeEnv
         export DISCOVER_PROBLEM_TYPE=trimul
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=530
-        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-530}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-1}
         export DISCOVER_DATA_SOURCE=gpu_mode_trimul
         export DISCOVER_CODE_LANGUAGE=cuda
         export GPU_EVAL_SERVER=${GPU_EVAL_SERVER:-}
@@ -143,9 +147,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.gpu_mode.env
         export DISCOVER_ENV_CLASS=GpuModeEnv
         export DISCOVER_PROBLEM_TYPE=mla_decode_nvidia
-        export DISCOVER_PHASE1_MAX_TOKENS=26000
-        export DISCOVER_EVAL_TIMEOUT=530
-        export DISCOVER_NUM_CPUS_PER_TASK=1
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-26000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-530}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-1}
         export DISCOVER_DATA_SOURCE=gpu_mode_mla_decode_nvidia
         export DISCOVER_CODE_LANGUAGE=cuda
         export GPU_EVAL_SERVER=${GPU_EVAL_SERVER:-}
@@ -164,9 +168,9 @@ case "${TASK}" in
         export DISCOVER_ENV_MODULE=examples.ahc.env
         export DISCOVER_ENV_CLASS=AhcEnv
         export DISCOVER_PROBLEM_TYPE=ahc039
-        export DISCOVER_PHASE1_MAX_TOKENS=22000
-        export DISCOVER_EVAL_TIMEOUT=600
-        export DISCOVER_NUM_CPUS_PER_TASK=2
+        export DISCOVER_PHASE1_MAX_TOKENS=${DISCOVER_PHASE1_MAX_TOKENS:-22000}
+        export DISCOVER_EVAL_TIMEOUT=${DISCOVER_EVAL_TIMEOUT:-600}
+        export DISCOVER_NUM_CPUS_PER_TASK=${DISCOVER_NUM_CPUS_PER_TASK:-2}
         export DISCOVER_DATA_SOURCE=ahc_039
         export DISCOVER_CODE_LANGUAGE=cpp
         ACTOR_LR=${ACTOR_LR:-2e-5}
@@ -194,6 +198,44 @@ PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-512}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-28672}
 LORA_RANK=${LORA_RANK:-32}
+# Which modules LoRA adapts. `all-linear` covers attention *and* MLP on a dense
+# model like Qwen3, but a MoE model keeps its experts in raw nn.Parameters that
+# PEFT cannot match -- on gpt-oss it therefore reaches the attention projections
+# only. Left configurable so that asymmetry is visible rather than implicit.
+LORA_TARGET_MODULES=${LORA_TARGET_MODULES:-all-linear}
+# Empty keeps verl's fp32 default. Rank 0 materialises the whole model on CPU
+# (see get_init_weight_context_manager), so a 21B model needs 84 GB of host RAM
+# in fp32 -- more than these boxes have. bf16 halves it.
+MODEL_DTYPE=${MODEL_DTYPE:-}
+# Attention backend. Empty keeps whatever the model declares. gpt-oss needs
+# sinks, which rules out sdpa, and transformers routes its flash path through
+# a hub kernel that has no build for torch 2.11+cu129 -- so eager is the only
+# implementation that actually loads there.
+ATTN_IMPL=${ATTN_IMPL:-}
+# vLLM's context window. Left unset, verl falls back to the checkpoint's
+# max_position_embeddings, which for gpt-oss is far larger than the KV cache
+# gpu_memory_utilization can hold -- the engine then dies mid-generation.
+# Keep it in step with the agent loop's own DISCOVER_MAX_MODEL_LEN.
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-}
+ROLLOUT_LEN_ARGS=""
+if [ -n "$ROLLOUT_MAX_MODEL_LEN" ]; then
+  ROLLOUT_LEN_ARGS="actor_rollout_ref.rollout.max_model_len=$ROLLOUT_MAX_MODEL_LEN"
+fi
+ATTN_ARGS=""
+if [ -n "$ATTN_IMPL" ]; then
+  ATTN_ARGS="+actor_rollout_ref.model.override_config.attn_implementation=$ATTN_IMPL"
+fi
+# Offloading params and optimizer state to host RAM was tuned for an 8B dense
+# model. Eight FSDP workers doing it for a 21B model exceeded this box's 99 GB
+# and Ray killed the vLLM servers; the GPUs meanwhile sat at 5 GB/card. Keep
+# the old default so existing runs are untouched, but let big models opt out.
+PARAM_OFFLOAD=${PARAM_OFFLOAD:-True}
+OPTIMIZER_OFFLOAD=${OPTIMIZER_OFFLOAD:-True}
+DTYPE_ARGS=""
+if [ -n "$MODEL_DTYPE" ]; then
+  DTYPE_ARGS="actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE"
+  DTYPE_ARGS="$DTYPE_ARGS actor_rollout_ref.ref.fsdp_config.model_dtype=$MODEL_DTYPE"
+fi
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
 # CUDA graph: False 可显著提速解码, True 为历史默认值
@@ -324,7 +366,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.model.lora_rank=${LORA_RANK} \
     actor_rollout_ref.model.lora_alpha=${LORA_RANK} \
-    actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.target_modules=${LORA_TARGET_MODULES} \
     "++actor_rollout_ref.model.lora.merge=True" \
     \
     actor_rollout_ref.actor.optim.lr=${ACTOR_LR} \
@@ -339,9 +381,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${PARAM_OFFLOAD} \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${OPTIMIZER_OFFLOAD} \
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
+    ${DTYPE_ARGS} \
+    ${ATTN_ARGS} \
+    ${ROLLOUT_LEN_ARGS} \
     \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP} \
@@ -356,7 +401,7 @@ python3 -m verl.trainer.main_ppo \
     \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU} \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=${PARAM_OFFLOAD} \
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${SP_SIZE} \
     \
     reward.custom_reward_function.path=${PWD}/ttt_discover/verl_integration/verl_reward.py \

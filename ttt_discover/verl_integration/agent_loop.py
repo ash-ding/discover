@@ -117,8 +117,17 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             model_path, trust_remote_code=True
         )
 
+        # Which renderer builds the prompt, and which generation protocol goes
+        # with it, are properties of the model family: Qwen3 needs the budgeted
+        # two-phase dance around <think>/</think>, while gpt-oss budgets its own
+        # reasoning via reasoning_effort and takes one plain call.
         from ttt_discover.tinker_utils import renderers
-        self._renderer = renderers.get_renderer("qwen3", tokenizer=self._tokenizer)
+        self._renderer = renderers.get_renderer(
+            discover_config.get("renderer", "qwen3"), tokenizer=self._tokenizer
+        )
+        self._generation_strategy = discover_config.get(
+            "generation_strategy", "two_phase"
+        )
 
         mod = importlib.import_module(discover_config["env_module"])
         self._env_cls = getattr(mod, discover_config["env_class"])
@@ -126,7 +135,26 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         self._phase1_max_tokens = discover_config.get("phase1_max_tokens", 26000)
         self._context_window = discover_config.get("max_model_len", 32768)
         self._context_buffer = 50
-        self._phase2_prefill = "\n\n... I need to give my final answer now.\n</think>\n"
+
+        # verl truncates anything past max_response_length, so the agent loop
+        # has to budget against that cap as well as the model context -- on
+        # gpt-oss the two differ and the context alone would overrun it.
+        self._max_response_length = discover_config.get("max_response_length", 0)
+
+        # The two-phase protocol is model-agnostic; only two strings in it are
+        # family-specific. Qwen3 delimits its reasoning with <think>/</think>,
+        # so ending it is a matter of emitting the closing tag. gpt-oss reasons
+        # in a harmony "analysis" channel, and the answer lives in a separate
+        # "final" channel: closing analysis is not enough, the final channel has
+        # to be opened explicitly, which is what the prefill below does.
+        if str(discover_config.get("renderer", "qwen3")).startswith("gpt_oss"):
+            self._thinking_end_marker = "<|channel|>final<|message|>"
+            self._phase2_prefill = (
+                "<|end|><|start|>assistant<|channel|>final<|message|>"
+            )
+        else:
+            self._thinking_end_marker = "</think>"
+            self._phase2_prefill = "\n\n... I need to give my final answer now.\n</think>\n"
         self._phase2_prefill_ids = self._tokenizer.encode(
             self._phase2_prefill, add_special_tokens=False
         )
@@ -226,7 +254,7 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             tasks = []
             for session_id in range(n):
                 task = asyncio.create_task(
-                    self._generate_two_phase(
+                    self._generate_and_score(
                         prompt_ids=prompt_ids,
                         sampling_params=sampling_params,
                         prompt=prompt,
@@ -291,24 +319,26 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             logger.exception(f"Error in _run_prompt_discover: {e}")
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
 
-    async def _generate_two_phase(
+    async def _produce_two_phase(
         self,
         prompt_ids: list[int],
         sampling_params: dict,
-        prompt: dict,
-        trajectory: dict,
-        validate: bool,
         session_id: int,
-    ) -> tuple[AgentLoopOutput, str, float]:
-        """Two-phase generation: thinking + forced answer + eval.
+    ):
+        """Qwen3-style budgeted generation: think, then force an answer.
 
-        Returns (output, extracted_code, reward_score).
+        Moved verbatim out of the old _generate_two_phase so the behaviour of
+        every run recorded so far is bit-for-bit unchanged. Returns
+        (response_ids, response_logprobs, response_mask, gen_time, extra).
         """
         import time
         t0 = time.time()
 
         prompt_len = len(prompt_ids)
-        phase1_budget = self._phase1_max_tokens - prompt_len
+        phase1_budget = min(
+            self._phase1_max_tokens - prompt_len,
+            self._budget(prompt_len),
+        )
         if phase1_budget <= 0:
             logger.warning(f"Prompt too long ({prompt_len}), using minimal budget")
             phase1_budget = 100
@@ -340,12 +370,13 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             response_ids = p1_tokens
             response_logprobs = p1_logprobs
             response_mask = [1] * len(p1_tokens)
-        elif self._contains_pattern(p1_tokens, "</think>"):
-            # Case B: budget exhausted but </think> present — thinking done,
-            # answer truncated. Continue generating without prefill.
+        elif self._contains_pattern(p1_tokens, self._thinking_end_marker):
+            # Case B: budget exhausted but the model already ended its
+            # reasoning on its own — thinking done, answer truncated. Continue
+            # generating without prefill.
             gen_case = "B"
             phase2_prompt = prompt_ids + p1_tokens
-            phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
+            phase2_budget = self._budget(len(phase2_prompt), len(p1_tokens))
             if phase2_budget <= 0:
                 response_ids = p1_tokens
                 response_logprobs = p1_logprobs
@@ -368,7 +399,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             # Inject prefill to force end of thinking and start answer.
             gen_case = "C"
             phase2_prompt = prompt_ids + p1_tokens + self._phase2_prefill_ids
-            phase2_budget = self._context_window - len(phase2_prompt) - self._context_buffer
+            phase2_budget = self._budget(
+                len(phase2_prompt), len(p1_tokens) + len(self._phase2_prefill_ids)
+            )
             if phase2_budget <= 0:
                 response_ids = p1_tokens + self._phase2_prefill_ids
                 response_logprobs = p1_logprobs + [0.0] * len(self._phase2_prefill_ids)
@@ -396,6 +429,11 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     + [1] * len(p2_tokens)
                 )
 
+        # Case A means the model stopped on its own, and it is reached
+        # exactly when the budget was not exhausted -- so B and C are the only
+        # cases left here, and each is truncated iff its second call ran out
+        # of budget too rather than reaching a stop token.
+        truncated = budget_exhausted and not self._hit_stop_token(response_ids)
         gen_time = time.time() - t0
 
         # BUG-005: Validate concatenated token IDs decode without corruption
@@ -408,6 +446,98 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
                     "Two-phase token junction mismatch: decoded=%r re_encoded=%r vs original=%r",
                     decoded_junction, re_encoded[:10], junction,
                 )
+        return (
+            response_ids,
+            response_logprobs,
+            response_mask,
+            gen_time,
+            {
+                "gen_case": gen_case,
+                "p1_len": len(p1_tokens),
+                "p2_len": p2_len,
+                # Only the single-phase path used to report this, so a
+                # two-phase run showed a truncation rate of zero when the
+                # field was simply never written. Case A stopped on its own;
+                # B and C ran a second call, so they are truncated exactly
+                # when that call exhausted its budget too.
+                "truncated": truncated,
+            },
+        )
+
+    async def _produce_single_phase(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict,
+        session_id: int,
+    ):
+        """One generation call, stopped by the renderer's own stop sequences.
+
+        For models that budget their own reasoning (gpt-oss exposes
+        reasoning_effort), the two-phase forced-answer trick is unnecessary:
+        there is no </think> to inject and no junction to splice. Whether the
+        model actually fits inside max_tokens is an empirical question, so
+        report truncation instead of papering over it.
+        """
+        import time
+
+        t0 = time.time()
+        budget = self._budget(len(prompt_ids))
+        if budget <= 0:
+            logger.warning(
+                "Prompt of %d tokens leaves no room in a %d-token window",
+                len(prompt_ids), self._context_window,
+            )
+            budget = 100
+
+        out = await self.llm_client.generate(
+            request_id=uuid.uuid4().hex,
+            prompt_ids=prompt_ids,
+            sampling_params={**sampling_params, "max_tokens": budget},
+        )
+        tokens = out.token_ids
+        logprobs = out.log_probs or [0.0] * len(tokens)
+        truncated = out.stop_reason == "length" or len(tokens) >= budget
+        gen_time = time.time() - t0
+        logger.info(
+            "single-phase: session=%s tokens=%d stop_reason=%s truncated=%s",
+            session_id, len(tokens), out.stop_reason, truncated,
+        )
+        return (
+            tokens,
+            logprobs,
+            [1] * len(tokens),
+            gen_time,
+            {"gen_case": "single", "truncated": truncated},
+        )
+
+    async def _generate_and_score(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict,
+        prompt: dict,
+        trajectory: dict,
+        validate: bool,
+        session_id: int,
+    ) -> tuple[AgentLoopOutput, str, float]:
+        """Produce one response with the configured strategy, then score it.
+
+        Returns (output, code, score, result_construction, raw_score_metric).
+        """
+        import time
+
+        produce = (
+            self._produce_single_phase
+            if self._generation_strategy == "single_phase"
+            else self._produce_two_phase
+        )
+        (
+            response_ids,
+            response_logprobs,
+            response_mask,
+            gen_time,
+            gen_extra,
+        ) = await produce(prompt_ids, sampling_params, session_id)
+        gen_case = gen_extra["gen_case"]
 
         # Construct AgentLoopOutput
         output = AgentLoopOutput(
@@ -556,8 +686,14 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
         reward_extra["error_type"] = eval_error_type
         reward_extra["score_us"] = raw_score_us
         reward_extra["gen_case"] = gen_case
-        reward_extra["p1_len"] = len(p1_tokens)
-        reward_extra["p2_len"] = p2_len
+        if "truncated" in gen_extra:
+            reward_extra["truncated"] = gen_extra["truncated"]
+        # Phase lengths only exist for the two-phase strategy; single-phase has
+        # no phases to measure. Reported through the extras dict so this tail
+        # stays free of variables that belong to one strategy.
+        for _k in ("p1_len", "p2_len"):
+            if _k in gen_extra:
+                reward_extra[_k] = gen_extra[_k]
         reward_extra["gen_time_s"] = round(gen_time, 3)
         reward_extra["eval_time_s"] = round(eval_time, 3)
         reward_extra["code"] = code
@@ -623,6 +759,19 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             partition_id=partition_id,
         )
 
+    def _budget(self, consumed: int, generated: int = 0) -> int:
+        """Tokens still generatable, whichever cap binds first.
+
+        `consumed` counts every token already in the prompt sent to vLLM
+        (original prompt plus anything prefilled or generated so far);
+        `generated` counts only the part that will land in the response, which
+        is what verl's max_response_length limits.
+        """
+        budget = self._context_window - consumed - self._context_buffer
+        if self._max_response_length:
+            budget = min(budget, self._max_response_length - generated)
+        return budget
+
     def _hit_stop_token(self, tokens: list[int]) -> bool:
         if not tokens or not self._stop_token_ids:
             return False
@@ -663,6 +812,9 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "env_class": os.environ.get("DISCOVER_ENV_CLASS", "CirclePackingEnv"),
             "problem_type": os.environ.get("DISCOVER_PROBLEM_TYPE", "26"),
             "phase1_max_tokens": int(os.environ.get("DISCOVER_PHASE1_MAX_TOKENS", "26000")),
+            "max_response_length": int(
+                self.config.actor_rollout_ref.rollout.response_length or 0
+            ),
             "max_model_len": int(os.environ.get("DISCOVER_MAX_MODEL_LEN", "32768")),
             "eval_timeout": int(os.environ.get("DISCOVER_EVAL_TIMEOUT", "530")),
             "num_cpus_per_task": int(os.environ.get("DISCOVER_NUM_CPUS_PER_TASK", "1")),
@@ -674,6 +826,12 @@ class DiscoverAgentLoopManagerTQ(AgentLoopManager):
             "topk_children": int(os.environ.get("DISCOVER_TOPK_CHILDREN", "2")),
             "max_buffer_size": int(os.environ.get("DISCOVER_MAX_BUFFER_SIZE", "1000")),
             "code_language": os.environ.get("DISCOVER_CODE_LANGUAGE", "python"),
+            # Model-family knobs. The defaults reproduce the Qwen3 pipeline
+            # exactly, so existing runs are unaffected by their presence.
+            "renderer": os.environ.get("DISCOVER_RENDERER", "qwen3"),
+            "generation_strategy": os.environ.get(
+                "DISCOVER_GENERATION_STRATEGY", "two_phase"
+            ),
             "gpu_eval_server": gpu_eval_from_env,
             "eval_server_url": eval_server_url,
         }

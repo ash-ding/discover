@@ -82,9 +82,17 @@ copies. Judge success by file count + bytes + md5, never by exit code.
   lumen2/lumen3 under `~/miniforge3`. Launch scripts resolve it with
   `ls miniforge3/... miniconda3/... | head -1` — `ls` sorts alphabetically, so `miniconda3`
   wins on lumen1, which happens to be correct there.
-- On **node10 the env is different**: `~/.conda/envs/lumen` (not under miniforge3 or
-  miniconda3 — globbing those paths finds nothing and will mislead you). It carries
-  vllm 0.23.0, torch 2.11.0+cu129, ray 2.56.0, openai 2.44.0.
+- On **node10 the env is `~/.conda/envs/verl_discover`** — same name as the lumens, but not
+  under miniforge3 or miniconda3 (globbing those paths finds nothing and will mislead you).
+  It was called `lumen` until 2026-09-28; scripts and logs older than that still say so.
+  It carries vllm 0.23.0, torch 2.11.0+cu129, ray 2.56.0, openai 2.44.0.
+- **transformers is pinned to 4.57.6 on node10**, downgraded in place from 5.12.1 on
+  2026-09-28. This is not cosmetic: transformers 5.x routes gpt-oss's flash attention
+  through the HF hub `kernels` package, which tries to fetch
+  `kernels-community/vllm-flash-attn3` — that repo publishes `torch211-cu128` and
+  `torch211-cu130` but **not** the `torch211-cu129` this env needs, so flash attention is
+  unreachable there and the only way forward would be `eager`. 4.57.6 uses the local
+  `flash_attn` directly. Do not upgrade transformers on node10 without re-checking this.
 - `~/install/cuda129` is the **live CUDA 12.9 toolkit** and is what `which nvcc` resolves to.
   `.bashrc` references it. The system only has CUDA 13.2. **Do not delete it.**
 
@@ -271,3 +279,133 @@ small model via SFT instead of running RL.
   memory check.
 - Full PUCT output is ~0.9 GB per 50-step run with `text` persisted, not the 25–50 GB an
   earlier estimate claimed.
+
+---
+
+## 9. gpt-oss training support — what works, what to watch
+
+Branch `feat/gpt-oss-training` (this repo) plus `feat/mxfp4-dequantize-passthrough` (the verl
+submodule) make the **VERL training path** accept `openai/gpt-oss-*`. Debugged on
+gpt-oss-20b, node10 GPUs 4-7. Three patches, each for a distinct wall:
+
+1. **MXFP4 cannot be trained.** The checkpoint stores every MoE expert as a `blocks`/`scales`
+   pair, and `Mxfp4HfQuantizer.is_trainable` raises outright. verl's FSDP engine now detects
+   `quantization_config.quant_method == "mxfp4"` and passes
+   `Mxfp4Config(dequantize=True)` to `from_pretrained`, which converts the experts to bf16
+   **at load time, in memory** — no pre-materialized bf16 checkpoint on disk is needed.
+   Disk stays ~20-27GB for the 20b; memory holds ~42GB.
+2. **vLLM must be told to stop expecting MXFP4.** The actor now pushes dequantized bf16
+   weights, but vLLM still read `quant_method` from the raw HF config and picked
+   `_load_weights_mxfp4`, which wants fused `w13_weight` names and dies with
+   `KeyError: 'layers.0.mlp.experts.w13_weight'`. The rollout server overrides the config to
+   `{"quant_method": ""}` — **an empty string, not `None` and not a missing key**. vLLM reads
+   it twice with different accessors: `ModelConfig` does `.get("quant_method", "").lower()`
+   (fatal on `None`) while `gpt_oss.load_weights` subscripts the key directly (fatal if
+   absent). Only `""` satisfies both.
+3. **The two-phase generation protocol had Qwen hardcoded into it.** See below — this was the
+   subtle one.
+
+### The generation protocol is the part that bites
+
+`agent_loop.py` budgets generation in two phases: think under a cap, then force an answer.
+That algorithm is model-agnostic, but two strings in it were Qwen3-specific — the marker
+saying reasoning is over (`</think>`) and the prefill that ends it. Both now come from the
+renderer family.
+
+gpt-oss does not delimit reasoning with tags; it reasons in a harmony **`analysis` channel**
+and answers in a separate **`final` channel**. Closing analysis is therefore not enough — the
+final channel has to be opened explicitly, so the prefill is
+`<|end|><|start|>assistant<|channel|>final<|message|>` and the "reasoning done" marker is
+`<|channel|>final<|message|>`. Both tokenize to clean special-token sequences and round-trip
+through decode/encode, which `_contains_pattern` relies on.
+
+**Why this matters more than it sounds:** run gpt-oss-20b at `gpt_oss_high_reasoning` with
+one plain generate call and it spends the *entire* budget inside `analysis`, never emitting a
+code block. Measured on erdos:
+
+| | one plain call (8 rollouts) | two-phase with harmony prefill (48) |
+|---|---|---|
+| produced a code block | 1/8 (12%) | **47/48 (98%)** |
+| truncated | 7/8 (88%) | **0/48** |
+| non-zero score | 1/8 | 18/48 (38%) |
+| best score | 2.366 | 2.594 |
+
+47 of 48 take Case C — the model never leaves `analysis` on its own. `p2_len` averages 2443
+tokens, peak 4367, so the forced final channel does real work rather than emitting a stub.
+
+So **an all-zero `critic/score` on gpt-oss is a generation-protocol symptom, not a scoring or
+weight-sync failure.** Check `rollouts/N.jsonl` for the `code` field before suspecting
+anything else: empty `code` means the model never got out of `analysis`.
+
+The zeros that remain are all legitimate domain outcomes — 17 generated programs crashed or
+timed out, 6 were caught by the C5 anti-cheat check, 5 violated `h ∈ [0,1]`, 1 divided by
+zero, 1 had no code block. A rollout batch on erdos is *supposed* to look like this; do not
+read 38% non-zero as a fault.
+
+**Do not read the per-step max as learning.** Across 6 steps it went 2.15, 2.34, 2.59, 2.59,
+2.36, 2.33 — 8 rollouts a step, LoRA that never touches the experts, and no baseline. That is
+noise, and the smoke test was never powered to show otherwise.
+
+### Budget against the response cap, not just the context
+
+`agent_loop.py` used to size its budgets from the model context alone. On gpt-oss the context
+(32768) and verl's `max_response_length` (28672) differ, and budgeting on the context
+overruns the cap — so the forced final answer gets truncated away by the very limit it was
+meant to fit inside. `_budget()` now takes the min of both. On Qwen3 the two caps coincide,
+so this only ever lowers a budget that would have been truncated anyway.
+
+### Knobs added to `run_verl.sh`
+
+All default to the previous behaviour, so Qwen3 runs are unaffected:
+
+| Variable | Purpose |
+|---|---|
+| `LORA_TARGET_MODULES` | default `all-linear` |
+| `MODEL_DTYPE` | → `fsdp_config.model_dtype`; `bf16` avoids fp32's 84GB for the 20b |
+| `PARAM_OFFLOAD` / `OPTIMIZER_OFFLOAD` | were hardcoded `True`, tuned for a dense 8B |
+| `ATTN_IMPL` | → `override_config.attn_implementation` |
+| `ROLLOUT_MAX_MODEL_LEN` | **must be set alongside `DISCOVER_MAX_MODEL_LEN`** |
+| `DISCOVER_GENERATION_STRATEGY` | `two_phase` (default) or `single_phase` |
+| `DISCOVER_PHASE1_MAX_TOKENS` | position cap on phase 1; leave room for the answer |
+
+`DISCOVER_MAX_MODEL_LEN` only affects the agent loop. If `ROLLOUT_MAX_MODEL_LEN` is left
+unset, vLLM falls back to `max_position_embeddings` (131072 for gpt-oss), the KV cache does
+not fit, and the run dies with `EngineDeadError` — which looks nothing like a context-length
+problem.
+
+**`run_verl.sh` used to clobber three of these.** Every per-task `case` block assigned
+`DISCOVER_PHASE1_MAX_TOKENS`, `DISCOVER_EVAL_TIMEOUT` and `DISCOVER_NUM_CPUS_PER_TASK`
+unconditionally, so exporting them before calling the script did nothing — silently, with the
+default appearing in the logs as if you had asked for it. They now use `${VAR:-default}`.
+The four settings beside them (env module, class, problem type, data source) are still
+assigned unconditionally on purpose: those define *which* task runs.
+
+Sizing the phase-1 budget is the main thing you will tune for a new model. It is a **position
+cap, not a token count** — the budget is `DISCOVER_PHASE1_MAX_TOKENS - prompt_len`, and what
+is left for the answer is whatever remains under `max_response_length`. For gpt-oss-20b on
+erdos: 26000 left ~3400 tokens for the final channel and one rollout in eight ran out
+mid-statement; 20000 leaves ~9400, against a longest observed answer of ~1900.
+
+### Known limitation, and it is a real confound
+
+`GptOssExperts` holds its weights as raw `nn.Parameter`, **not** `nn.Linear`. PEFT's
+`all-linear` therefore reaches only `q_proj/k_proj/v_proj/o_proj` — **the experts are never
+adapted.** Any gpt-oss-vs-Qwen3 comparison is comparing "LoRA on attention only" against
+"LoRA on attention + MLP". Do not present such a comparison as like-for-like without saying
+so, or without first teaching PEFT to target the expert parameters.
+
+### Other things that cost time here
+
+- `run_verl.sh:23` dereferenced `$CONDA_DEFAULT_ENV` unguarded, so every non-interactive
+  launch died under `set -u`. Fixed, but older copies of the script still have it.
+- Host **RAM**, not GPU memory, is the binding constraint when loading the 120b: verl's
+  `get_init_weight_context_manager` has rank 0 materialize the *full* model on CPU while
+  other ranks use meta tensors. On a 99GB host the 42GB bf16 20b peaked at 51GB anon and
+  got killed. TP equal to the GPU count keeps it to one replica and one materialization.
+- These hosts are LXC containers: `memory.current` counts page cache, so Ray's OOM monitor
+  kills jobs while `free` still reports tens of GB available. `free` is not the number Ray
+  is looking at.
+- Killing a vLLM run with `pkill` on the launcher leaves **EngineCore workers holding ~18GB
+  per card**. The next attempt then dies of CUDA OOM for no visible reason. Kill by PID from
+  `nvidia-smi --query-compute-apps`, and filter to your own user — GPU 0 on node10 carries
+  another user's job.
