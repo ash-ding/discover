@@ -371,8 +371,9 @@ class DiscoverAgentLoopWorkerTQ(AgentLoopWorker):
             response_logprobs = p1_logprobs
             response_mask = [1] * len(p1_tokens)
         elif self._contains_pattern(p1_tokens, self._thinking_end_marker):
-            # Case B: budget exhausted but </think> present — thinking done,
-            # answer truncated. Continue generating without prefill.
+            # Case B: budget exhausted but the model already ended its
+            # reasoning on its own — thinking done, answer truncated. Continue
+            # generating without prefill.
             gen_case = "B"
             phase2_prompt = prompt_ids + p1_tokens
             phase2_budget = self._budget(len(phase2_prompt), len(p1_tokens))
