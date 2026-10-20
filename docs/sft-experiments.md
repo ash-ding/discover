@@ -1,6 +1,6 @@
 # SFT-vs-RL 实验计划与调研记录
 
-写于 2026-09-29。本文档整理"用 SFT 替代/辅助 TTT-Discover 的 RL 训练"这一系列实验的
+写于 2026-09-29，进展记录见 §6（最后更新 2026-10-20）。本文档整理"用 SFT 替代/辅助 TTT-Discover 的 RL 训练"这一系列实验的
 动机、已完成的数据验证、实验分类（A1 / A2 / B1 / B2）、SFT 数据规范和相关工作。
 所有数字都是从共享盘 `~/data/discover-runs/`（lumen 视角）的原始 rollout 记录中用
 float64 重新计算的，不是转述。
@@ -213,3 +213,71 @@ PPO-ptx）。B1 的已知风险：对自身高分样本反复 SFT 会压低输�
 - 每次 PUCT 启动前跑 `bash scripts/preflight_puct.sh <EXP> <RAY_TMP>`。
 - 归档到 `~/data/discover-runs/<run>/`；`cp -a` 的 rc=1 不代表失败，
   按文件数+字节+md5 判断；从非写入主机验证。
+
+---
+
+## 6. 进展记录
+
+### 2026-09-29 — 聚焦 Erdős；SFT 完成；第一个探针出数
+
+**范围决定（用户）**：时间与算力有限，只做 Erdős；AC1 全部产物封存备用
+（数据集 `~/data/sft-datasets/ac1_a1_cap4.parquet`、adapter 与训练日志
+`~/data/sft-datasets/ac1-sft-a1-cap4/`、16G checkpoint 与合并模型留在 lumen2 本地）。
+A1/A2 直接用训练 run 的 rollout 数据，base-自产消融不做（用户决定，不纠结纯度）。
+
+**数据集**（`scripts/build_sft_dataset.py`，commit `34ea3f8`）：
+erdos 4,792 条 / 1,200 parents / token p50=10.9k / 污染基线 0.3809193429；
+ac1 4,448 条 / 1,112 parents / 污染基线 1.5045236176。
+prompt 往返校验 50/50；affix 提取零失败；code 零重复。
+
+**踩掉的坑——Qwen3 chat template 静默剥除思维链**：assistant 轮保留 `<think>`
+要求该轮位于整个 messages 的最后一个 user 之后（`loop.index0 > ns.last_query_index`）；
+`MultiTurnSFTDataset` 逐轮渲染，条件永不成立，训练目标的 reasoning 被整段丢弃
+（实测 10.3k token 样本坍缩成 4.1k）。修法：训练用改掉该位置条件的 tokenizer 副本
+（`run_sft.sh` 自动生成 `<MODEL>-sft-tokenizer`），serving 用原版。修后逐轮=整体渲染，
+sanity check 通过，loss 从 `<think>` 首 token 覆盖到 `<|im_end|>`。
+
+**SFT**（`erdos-sft-a1-cap4`，lumen3）：LoRA rank32/alpha32/all-linear（与 RL 同构）、
+bf16、lr 2e-5、2 epoch、298 步。loss 全程平（0.599→0.609）——数据是同族模型 T=1 采样，
+NLL 已在熵底，属预期；SFT 的作用是把概率质量移向 valid 子集，不体现在 loss。
+adapter 252/252 个 lora_B 非零（范数 2.65），确证权重有更新但幅度温和。
+合并模型：`~/models/Qwen3-8B-sft-erdos`（lumen3，16G，原版 tokenizer）。
+adapter 归档：`~/data/sft-datasets/erdos-sft-a1-cap4/`。
+
+**探针 #1（step-1 seed 条件，512 rollouts，配对）**：
+lumen3 跑 SFT（`qwen3-8b-sft-erdos-inference-only`，兼作 A1 正式目录，可续跑），
+lumen2 同时跑 base（`qwen3-8b-erdos-probe-base-20260929`，已归档到 discover-runs）。
+配置与历史 run 逐项一致（8×64、max_tokens 26000、T=1.0、concurrency 96）。
+
+| 指标 | SFT | base |
+|---|---|---|
+| valid 率 | 26.8% (137/512) | 26.2% (134/512) |
+| crash / h越界 / 反作弊 | 59.4 / 8.4 / 2.7% | 62.3 / 7.4 / 2.1% |
+| improved-vs-parent | **20.3% (104)** | 16.4% (84) |
+| best raw | 0.38222 | 0.38270 |
+| pass@4 / @8 / @16 | .720/.928/.996 | .701/.908/.991 |
+| uniq code 率 | 92.0% | 94.9% |
+
+**判读**：seed prompt 上有效率无改善（差距远在噪声内）；但无模式坍缩、无长度膨胀、
+pass@k 两曲线不交叉；唯一偏正信号是 improved 率（z≈1.6）。三个候选解释：
+(1) 分布错位——SFT 数据的 parent 多为 run 中后期好构造，step-1 的 seed 弱构造
+不在其分布内；(2) 训练太温和；(3) 机制假设对 Erdős 不成立（step-1 失败 60% 是
+crash，而 §1.2 已示 RL 也修不动 crash）。
+
+**探针 #2（设计好，待 GPU）**：把历史 run 的 step-50 PUCT snapshot 复制为新实验
+目录作续跑起点（PUCT 自动从成熟 archive 采 8 个好 parent），base 与 SFT 各跑 1 步
+512 条——在 SFT 数据真正的 prompt 分布上配对对比，判别解释 (1)。
+好 parent 上 SFT 赢 → 跑满 A1；仍平 → 回炉（更高 lr / improved-only / 更多 epoch）。
+launcher 已在两台机器家目录：`launch_sft_erdos_probe.sh`（lumen3，TOTAL_STEPS 可改 50
+续跑 A1）、`launch_base_erdos_probe.sh`（lumen2）。
+
+### 2026-10-20 — 三周后回归；归档与现状
+
+- **gptoss-erdos-50step-repeat2 跑完**：50/50 步，best_ever=**0.3808606799**，
+  项目新纪录（纯推理）。已归档 `~/data/discover-runs/gptoss-erdos-50step-repeat2/`
+  （stdout log 在 `log/`）。注意它跑在 #17 之前的代码上：rollouts 有 text
+  （仅 final channel，无 reasoning），parent 是旧的内存哈希。
+- 主机现状：lumen1 GPU 被 idle 回收（文件系统完好）；lumen2 疑似同样被回收；
+  lumen3 被用户其他项目占满（azr/coevolve/memevol），对本项目不可用；
+  用户正在 reclaim lumen1/lumen2。
+- 下一步：GPU 到位 → 探针 #2（两台各 1 小时）→ 按判读分支走。

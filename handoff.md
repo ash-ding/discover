@@ -1,6 +1,6 @@
 # Handoff — TTT-Discover reproduction
 
-Written 2026-09-28, updated 2026-09-29. Everything below was verified on the machines on
+Written 2026-09-28, updated 2026-10-20. Everything below was verified on the machines on
 the day it was written, not recalled. Section 1 is the only part that goes stale on its
 own — re-check it before you act on it.
 
@@ -11,33 +11,38 @@ own — re-check it before you act on it.
 
 ## 1. Where things stand right now
 
-*As of 2026-09-29 17:20 UTC. Verify before acting — this is the one section that decays.*
+*As of 2026-10-20. Verify before acting — this is the one section that decays.*
 
-**One job is running, on lumen1. Do not disturb it.**
+**Nothing is running for this project. The active workstream is the SFT-vs-RL experiment
+series — read `docs/sft-experiments.md` (plan AND progress log) before touching it.**
 
 | Host | State |
 |---|---|
-| **lumen1** | **RUNNING** the third gpt-oss erdos inference-only repeat. Step 7/50, ~2.9h a step, 0 errors, `best=0.38086449`. Started 2026-09-28 21:46 UTC; **~5 days left**, finishing around Oct 4-5. |
-| lumen2 | idle, 0 GPU |
-| lumen3 | idle, 0 GPU |
-| node10 | idle **for us**. GPU 0 holds 72G belonging to user `lab` — not ours, never kill it. GPUs 4-7 are the ones to use. |
+| lumen1 | GPUs **reclaimed** (idle reclaim, rebooted ~Oct 15). Filesystem intact. User is re-reclaiming. |
+| lumen2 | GPUs likely reclaimed (nvidia-smi silent). User is re-reclaiming. |
+| lumen3 | **Occupied by the user's other projects** (azr/coevolve/memevol tmux sessions, all 8 GPUs ~70G). Not available to this project — do not touch its GPUs. |
+| node10 | Only GPUs 5-7 were ours to use last checked (Sep 29). Re-check owners before using. |
 
-**lumen1 is deliberately NOT synced.** Its repo sits at `ff80d9a` while every other host is at
-`f150b9e`. Do not `git pull` there until the run finishes: the loop uses Ray, and a worker
-spawned mid-run would re-import from disk. The already-running process is safe either way, but
-there is no reason to take the risk for a run with five days invested in it.
+**The third gpt-oss erdos repeat finished**: `gptoss-erdos-50step-repeat2`, 50/50 steps,
+`best_ever=0.3808606799` — the project's best Erdős value, from an inference-only run.
+Archived to `~/data/discover-runs/gptoss-erdos-50step-repeat2/` on 2026-10-20 (stdout log in
+`log/`). Despite the `repeat2` name it is the **third** repeat — the convention is bare /
+`-repeat` / `-repeat2`, matching the qwen3 series. Note: it ran on pre-#17 code, so its
+rollouts have `text` (final channel only, no reasoning) and the old `parent` hash field.
 
-Run: `~/launch_gptoss_repeat2.sh`, log `~/gptoss_run_gptoss-erdos-50step-repeat2.log`, output
-`checkpoints/gptoss-puct/gptoss-erdos-50step-repeat2`. Despite the `repeat2` name this is the
-**third** repeat — the convention is bare / `-repeat` / `-repeat2`, matching the qwen3 series.
+**gpt-oss training support is merged** (ash-ding/discover#16, ash-ding/verl#1, merge commits
+on purpose — see [section 9](#9-gpt-oss-training-support--what-works-what-to-watch)). Since
+then `main` gained #17 (rollout provenance: prompt/reasoning/parent-uuid/eval detail persisted,
+preflight assertion 1b) and the SFT tooling (`scripts/build_sft_dataset.py`,
+`scripts/run_sft.sh`, `docs/sft-experiments.md`). All hosts including lumen1 may now sync to
+`main` — the no-pull freeze on lumen1 ended with its run.
 
-**gpt-oss training support is merged.** ash-ding/discover#16 and ash-ding/verl#1, both by merge
-commit rather than squash so the submodule pointer `e89c4168` stays an ancestor of verl `main`.
-`main` is `f150b9e`, verl submodule `e89c4168`. See [section 9](#9-gpt-oss-training-support--what-works-what-to-watch).
-
-**Nothing is left half-done.** No open branches, no uncommitted work on any host, no cron
-watchdogs. The two feature worktrees (`~/code/discover-gptoss` on lumen2 and node10) were
-removed after the merge.
+**In flight, SFT workstream** (details and numbers in `docs/sft-experiments.md` §6):
+Erdős LoRA-SFT checkpoint trained and merged (`~/models/Qwen3-8B-sft-erdos` on lumen3);
+step-1 paired probe done — **no validity gain at the seed prompt** (26.8% vs 26.2%), no
+distribution damage either; next action is the good-parent probe, waiting on GPUs.
+`checkpoints/gptoss-puct/qwen3-8b-sft-erdos-inference-only/` on lumen3 is the A1 run's live
+directory at step 1 — do not delete; the 50-step run resumes from it.
 
 ---
 
@@ -214,7 +219,7 @@ All records: `~/data/discover-runs` (19 entries). Values below are best-over-his
 |---|---|
 | Qwen3-8B trained (VERL) | 0.3809193429, 0.3809267260, 0.3809884112 |
 | Qwen3-8B inference-only | 0.3809621418, 0.3809867812, 0.3809915481 |
-| gpt-oss-120b inference-only | **0.3808638785**, 0.3808693927 |
+| gpt-oss-120b inference-only | **0.3808606799**, 0.3808638785, 0.3808693927 |
 
 A fourth trained run (`erdos-gradclip1-50step`, `grad_clip=1.0`) is excluded by the user's
 instruction; the three shown used `grad_clip=1e9`.
