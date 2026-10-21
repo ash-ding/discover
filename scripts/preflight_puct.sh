@@ -47,6 +47,19 @@ else
   fail=1
 fi
 
+# 1c. Same persistence contract for the Claude loop: before 2026-10-20 it
+#     dropped thinking blocks entirely (only text blocks were joined into the
+#     dump), kept no prompt, and recorded the parent as a 0-7 group index.
+#     A Claude run pays API dollars per rollout; its dumps must be reusable.
+if grep -q 'b.type == "thinking"' scripts/claude_puct_loop.py 2>/dev/null \
+   && grep -q 'prompt=prompt' scripts/claude_puct_loop.py 2>/dev/null \
+   && grep -q 'puct_parent_id=state.id' scripts/claude_puct_loop.py 2>/dev/null; then
+  say "claude-loop persistence" "present"
+else
+  say "claude-loop persistence" "MISSING - thinking/prompt/parent would be lost"
+  fail=1
+fi
+
 # 2. The server must be able to advertise a name other than gpt-oss-120b, or
 #    every request for the model actually loaded returns 404 - and only after
 #    all replicas have finished loading.

@@ -25,6 +25,7 @@ Environment:
     ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION   read from shell profile
 """
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -164,12 +165,20 @@ async def generate_one(client, model, system, prompt, hint, sem, cfg, usage, idx
                 r = await s.get_final_message()
             usage.add(r.usage)
             text = "".join(b.text for b in r.content if b.type == "text")
-            return dict(ok=True, text=text, code=extract_code(text),
+            # Thinking blocks are the run's most expensive output -- persist
+            # them (mirrors discover#17 on the vLLM loop, where every gpt-oss
+            # run before the fix silently dropped its reasoning).
+            reasoning = "".join(b.thinking for b in r.content
+                                if b.type == "thinking") or None
+            return dict(ok=True, prompt=prompt, hint=hint or None,
+                        text=text, reasoning=reasoning, code=extract_code(text),
                         truncated=r.stop_reason == "max_tokens",
                         out_tokens=r.usage.output_tokens,
                         stop=r.stop_reason, secs=round(time.time() - t0, 1))
         except Exception as e:
-            return dict(ok=False, text="", code="", truncated=False, out_tokens=0,
+            return dict(ok=False, prompt=prompt, hint=hint or None,
+                        text="", reasoning=None, code="",
+                        truncated=False, out_tokens=0,
                         stop="error", secs=round(time.time() - t0, 1),
                         error=f"{type(e).__name__}: {str(e)[:200]}", idx=idx)
 
@@ -194,6 +203,16 @@ async def rollouts_for_parent(client, model, system, prompt, sem, cfg, usage):
 
 # ------------------------------------------------------------------ the loop
 async def main():
+    # Size the eval thread pool explicitly (mirrors vllm_puct_loop.py): every
+    # score_one() dispatches through asyncio.to_thread's default executor,
+    # whose stock size is min(32, cpu_count + 4). erdos programs run their
+    # full ~1000s budget, so 512 of them 32 at a time is 4.4h of evaluation
+    # per step on a 160-core host that could do it in a quarter of that.
+    _eval_threads = int(os.getenv("EVAL_THREADS", "32"))
+    asyncio.get_running_loop().set_default_executor(
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=_eval_threads, thread_name_prefix="eval"))
+
     task = os.getenv("TASK")
     if task not in TASKS:
         sys.exit(f"TASK must be one of {sorted(TASKS)}; got {task!r}")
@@ -295,6 +314,8 @@ async def main():
 
     json.dump({"task": task, "experiment": exp, "resumed_from": resume,
                "config": cfg, "concurrency": concurrency,
+               "eval_threads": _eval_threads,
+               "system_prompt": system,
                "project": os.getenv("ANTHROPIC_VERTEX_PROJECT_ID", "lightwell-devel"),
                "region": os.getenv("CLOUD_ML_REGION", "global"),
                "target": T["target"], "minimize": T["minimize"],
@@ -364,10 +385,15 @@ async def main():
             # of None means the rollout produced no usable response, which is itself
             # the signal that the attempt failed.
             for _r, _sc in zip(results, scored):
-                _rec = dict(_r, parent=pi)
+                _rec = dict(_r, parent=pi,
+                            puct_parent_id=state.id,
+                            puct_parent_value=state.value)
                 if _sc:
                     _rec["score"] = float(_sc.get("score", 0.0) or 0.0)
                     _rec["raw_score"] = _sc.get("raw_score")
+                    _rec["eval_msg"] = _sc.get("eval_msg")
+                    _rec["correctness"] = _sc.get("correctness")
+                    _rec["result_construction"] = _sc.get("result_construction")
                 all_results.append(_rec)
             # Progress within a step: a step is 8x64 calls and can run for
             # tens of minutes, so print per parent rather than going dark.
