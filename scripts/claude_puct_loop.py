@@ -157,7 +157,13 @@ async def generate_one(client, model, system, prompt, hint, sem, cfg, usage, idx
             async with client.messages.stream(
                     model=model,
                     max_tokens=cfg["max_tokens"],
-                    thinking={"type": "adaptive"},
+                    # display="summarized": the raw chain of thought is never
+                    # returned on this model family, and the default "omitted"
+                    # ships thinking blocks with EMPTY text -- measured on
+                    # probe-erdos-opus48-medium, 64/64 rollouts persisted
+                    # reasoning="". Summaries are the best we can keep, at no
+                    # extra token cost.
+                    thinking={"type": "adaptive", "display": "summarized"},
                     output_config={"effort": cfg["effort"]},
                     system=[{"type": "text", "text": system,
                              **({"cache_control": {"type": "ephemeral"}} if cfg["cache"] else {})}],
